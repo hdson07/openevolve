@@ -1,0 +1,54 @@
+# Example: drive OpenEvolve through a local Claude Code CLI session.
+#
+# Prereqs:
+#   1. Install Claude Code CLI and log in once: `claude login`
+#      (Pro/Max subscription is used for billing; no API key required.)
+#   2. Install the SDK extra:  pip install -e ".[claude-code]"
+#
+# Caveats:
+#   - Subscription rate limits (5-hour windows) apply. Heavy evolution runs
+#     will hit them quickly; consider mixing Claude Code with API-keyed models
+#     in the ensemble, or lowering `max_iterations`.
+#   - `temperature`, `top_p`, and `random_seed` are ignored by this backend
+#     (the SDK does not expose them). Reproducibility is reduced.
+#   - `max_tokens` is not enforced; use `max_thinking_tokens` instead.
+
+max_iterations: 50
+checkpoint_interval: 10
+
+llm:
+  models:
+    - name: "claude-sonnet-4-6"
+      provider: "claude_code"
+      weight: 0.7
+      system_message: "You are an expert code evolution assistant."
+      timeout: 180
+      retries: 2
+      retry_delay: 10
+      # Optional Claude Code-specific knobs:
+      reasoning_effort: "medium"        # one of: low, medium, high, xhigh, max
+      max_thinking_tokens: null          # cap extended thinking budget
+      # cli_path: "/opt/homebrew/bin/claude"
+      # claude_code_options:              # raw kwargs forwarded to ClaudeAgentOptions
+      #   fallback_model: "claude-haiku-4-5"
+
+    - name: "claude-haiku-4-5"
+      provider: "claude_code"
+      weight: 0.3
+      timeout: 120
+
+  evaluator_models:
+    - name: "claude-haiku-4-5"
+      provider: "claude_code"
+      weight: 1.0
+      timeout: 120
+
+prompt:
+  system_message: "You are an expert code evolution assistant."
+
+database:
+  num_islands: 3
+  population_size: 100
+
+evaluator:
+  parallel_evaluations: 1               # keep low to avoid rate-limit bursts

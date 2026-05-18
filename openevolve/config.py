@@ -56,6 +56,10 @@ class LLMModelConfig:
     api_key: Optional[str] = None
     name: str = None
 
+    # Backend selection. None / "openai" -> OpenAILLM (default, OpenAI-compatible).
+    # "claude_code" -> ClaudeCodeLLM (uses local Claude Code CLI session auth).
+    provider: Optional[str] = None
+
     # Custom LLM client
     init_client: Optional[Callable] = None
 
@@ -82,6 +86,12 @@ class LLMModelConfig:
     # Manual mode (human-in-the-loop)
     manual_mode: Optional[bool] = None
     _manual_queue_dir: Optional[str] = None
+
+    # Claude Code backend options (only used when provider == "claude_code")
+    max_thinking_tokens: Optional[int] = None
+    cli_path: Optional[str] = None
+    cwd: Optional[str] = None
+    claude_code_options: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         """Post-initialization to resolve ${VAR} env var references in api_key"""
