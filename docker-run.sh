@@ -221,6 +221,56 @@ mkdir -p "$DOCKER_PERSIST_DIR"
 # Initialize persistent files if they don't exist (to avoid mounting as directories)
 touch "$DOCKER_PERSIST_DIR/.bash_history" 2>/dev/null || true
 
+# Claude Code config dir — mounted into container so settings/sessions persist.
+# Note: on macOS, OAuth credentials live in Keychain (not in this dir).
+# To authenticate from inside the container, run `claude setup-token` on the
+# host once and export CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) in your
+# shell before invoking this script. The vars are forwarded below.
+CLAUDE_CONFIG_DIR="$HOME/.claude"
+mkdir -p "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
+
+# Persistent dir for container-side `claude` install (root mode uses --rm, so
+# anything written to /root/.local is lost between runs). Mount this so the
+# standalone installer's binary at ~/.local/bin/claude survives.
+CLAUDE_LOCAL_PERSIST_DIR="$DOCKER_PERSIST_DIR/claude-local"
+mkdir -p "$CLAUDE_LOCAL_PERSIST_DIR/bin" 2>/dev/null || true
+
+# Collect Claude/Anthropic env vars to forward. Skip empty ones.
+CLAUDE_ENV_OPTS=()
+for var in OPENAI_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
+           ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_USE_BEDROCK \
+           CLAUDE_CODE_USE_VERTEX; do
+    if [[ -n "${!var}" ]]; then
+        CLAUDE_ENV_OPTS+=("-e" "$var=${!var}")
+    fi
+done
+
+# Container runs as root; Claude CLI refuses --dangerously-skip-permissions
+# under uid 0 unless IS_SANDBOX=1 declares the env is already sandboxed.
+CLAUDE_ENV_OPTS+=("-e" "IS_SANDBOX=1")
+
+# Try to mount host's `claude` CLI into the container. Only safe when host and
+# container share the same OS/arch (Linux x86_64 host, Linux x86_64 container).
+# On macOS hosts the Mac binary will NOT run in a Linux container, so we skip
+# the mount and rely on the container having `@anthropic-ai/claude-code`
+# installed (e.g. `npm install -g @anthropic-ai/claude-code` once inside).
+CLAUDE_CLI_MOUNT_OPTS=()
+HOST_OS="$(uname -s)"
+if [[ "$HOST_OS" == "Linux" ]]; then
+    if HOST_CLAUDE_BIN=$(command -v claude 2>/dev/null); then
+        # Resolve symlink (npm installs `claude` as a symlink to cli.js).
+        HOST_CLAUDE_REAL=$(readlink -f "$HOST_CLAUDE_BIN" 2>/dev/null || echo "$HOST_CLAUDE_BIN")
+        CLAUDE_CLI_MOUNT_OPTS+=(
+            "-v" "$HOST_CLAUDE_BIN:/usr/local/bin/claude:ro"
+        )
+        # If symlink target lives elsewhere, mount the real file too.
+        if [[ "$HOST_CLAUDE_REAL" != "$HOST_CLAUDE_BIN" ]]; then
+            CLAUDE_CLI_MOUNT_OPTS+=("-v" "$HOST_CLAUDE_REAL:$HOST_CLAUDE_REAL:ro")
+        fi
+        echo -e "${BLUE}Mounting host claude CLI: $HOST_CLAUDE_BIN${NC}"
+    fi
+fi
+
 # Configure Docker run options based on Docker mode (rootless vs root)
 if [ "$ROOTLESS_DOCKER" = true ]; then
     # Rootless Docker: Mount user's home directory as per the guide
@@ -245,6 +295,10 @@ if [ "$ROOTLESS_DOCKER" = true ]; then
         "-e" "HOME=$HOME"
         "-e" "TZ=Asia/Seoul"
     )
+    # Rootless: $HOME bind already exposes ~/.claude. Just forward env vars
+    # and (Linux only) the host's claude CLI binary.
+    DOCKER_RUN_OPTS+=("${CLAUDE_ENV_OPTS[@]}")
+    DOCKER_RUN_OPTS+=("${CLAUDE_CLI_MOUNT_OPTS[@]}")
     # Rootless Docker stores credentials in ~/.config/docker/config.json
     # Mount it to ~/.docker/config.json for container compatibility
     if [[ -f "$HOME/.config/docker/config.json" ]]; then
@@ -272,10 +326,16 @@ else
         "-v" "$DOCKER_PERSIST_DIR/.bash_history:/home/appuser/.bash_history"
         "-v" "$HOME/.gitconfig:/root/.gitconfig"
         "-v" "$HOME/.gitconfig:/home/appuser/.gitconfig"
+        "-v" "$CLAUDE_CONFIG_DIR:/root/.claude"
+        "-v" "$CLAUDE_CONFIG_DIR:/home/appuser/.claude"
+        "-v" "$CLAUDE_LOCAL_PERSIST_DIR:/root/.local"
+        "-v" "$CLAUDE_LOCAL_PERSIST_DIR:/home/appuser/.local"
         "-w" "/app"
         "-e" "TZ=Asia/Seoul"
         "-e" "HOST_PROJECT_DIR=$SCRIPT_DIR"
     )
+    DOCKER_RUN_OPTS+=("${CLAUDE_ENV_OPTS[@]}")
+    DOCKER_RUN_OPTS+=("${CLAUDE_CLI_MOUNT_OPTS[@]}")
 fi
 
 # Add options based on execution mode
@@ -306,6 +366,11 @@ else
     echo -e "  Log Directory: $SCRIPT_DIR/logs"
     echo -e "  Persistent Data: $DOCKER_PERSIST_DIR (bash history, gitconfig)"
     echo -e "  Docker Credentials: ~/.docker/config.json (read-only)"
+    echo -e "  Claude Code Config: $CLAUDE_CONFIG_DIR (→ /root/.claude, /home/appuser/.claude)"
+    echo -e "  Claude Local Bin:   $CLAUDE_LOCAL_PERSIST_DIR (→ /root/.local, /home/appuser/.local)"
+fi
+if [ ${#CLAUDE_ENV_OPTS[@]} -gt 0 ]; then
+    echo -e "  Forwarded env vars:$(printf ' %s' "${CLAUDE_ENV_OPTS[@]}" | sed 's/-e //g' | sed 's/=[^ ]*/=***/g')"
 fi
 echo ""
 

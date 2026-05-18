@@ -45,7 +45,7 @@ SMT_OVERRIDES = {
     "smt.phase_caching_on": 400,
     "smt.phase_caching_off": 100,
     "smt.restart_strategy": 1,                 # 0=geometric | 1=inner_outer | 2=luby | 3=fixed | 4=arithmetic
-    "smt.restart.factor": 1.1,
+    # smt.restart.factor: not in z3 4.13.3.0 — removed.
     "smt.lemma_gc_strategy": 0,                # 0=fixed | 1=geometric | 2=at_restart | 3=none
 
     # Lemma / unit delay
@@ -69,7 +69,7 @@ SMT_OVERRIDES = {
     "smt.pull_nested_quantifiers": False,
     "smt.refine_inj_axioms": True,
     "smt.solve_eqs": True,
-    "smt.solve_eqs_max_occs": 4294967295,
+    # smt.solve_eqs_max_occs: not in z3 4.13.3.0 — removed.
     "smt.theory_aware_branching": False,
     "smt.theory_case_split": False,
     "smt.dt_lazy_splits": 1,
@@ -137,7 +137,7 @@ SMT_OVERRIDES = {
 
     # BV (light usage in this workload)
     "smt.bv.delay": True,
-    "smt.bv.eager": True,
+    # smt.bv.eager: not in z3 4.13.3.0 — removed.
     "smt.bv.enable_int2bv": True,
     "smt.bv.reflect": True,
     "smt.bv.size_reduce": False,

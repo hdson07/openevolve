@@ -37,6 +37,12 @@ if [ ! -f "$ROOT/shared/stage1_sample.json" ]; then
     python "$ROOT/build_stage1_sample.py"
 fi
 
+if [ ! -f "$ROOT/shared/local_baseline.json" ]; then
+    echo "local_baseline.json missing — running rebaseline_local.py first (~5 min, 20 problems)..."
+    python "$ROOT/rebaseline_local.py" || \
+        echo "warning: rebaseline_local.py finished with mismatches; evaluator will fall back to raw_ms for those."
+fi
+
 if ! command -v z3 >/dev/null 2>&1; then
     echo "warning: z3 binary not on PATH. install: apt-get install -y z3  or  pip install z3-solver" >&2
 fi

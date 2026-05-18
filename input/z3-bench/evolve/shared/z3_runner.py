@@ -1,52 +1,48 @@
 """
-Run Z3 CLI on a single SMT2 file with parameter dict.
-Subprocess isolation: each run a fresh process with -T:<sec> wall-clock cap.
+Run a single SMT2 file through Z3 with given parameters.
+
+Implementation: spawn `_z3_solve_worker.py` as a subprocess and communicate
+via stdout JSON. The worker imports the z3 Python binding and applies params
+via `z3.set_param()`, matching the original benchmark setup that recorded
+`applied_params_hash 543b29...`. This is necessary because the z3 CLI
+positional `key=value` form rejects globals (`threads`, `parallel.enable`,
+`sls.parallel`) that the Python binding accepts.
+
+Subprocess isolation gives: hard wall-clock timeout, crash containment,
+memory reclaim between problems.
 """
-import re
+import json
+import pathlib
 import shutil
 import subprocess
+import sys
 import time
 
-_RESULT_RE = re.compile(r"^(sat|unsat|unknown)\b", re.MULTILINE)
-_INVALID_PARAM_RES = [
-    re.compile(r"unknown\s+parameter\s+'?([\w.\-]+)'?", re.IGNORECASE),
-    re.compile(r"invalid\s+parameter\s+'?([\w.\-]+)'?", re.IGNORECASE),
-    re.compile(r"unknown\s+option\s+'?([\w.\-]+)'?", re.IGNORECASE),
-    re.compile(r"error\s+setting\s+'?([\w.\-]+)'?", re.IGNORECASE),
-]
+_WORKER = str(pathlib.Path(__file__).resolve().parent / "_z3_solve_worker.py")
+_TASKSET = shutil.which("taskset")  # Linux only; None on macOS / missing
 
 
-def _format_value(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
-
-
-def detect_invalid_param(stderr):
-    for rx in _INVALID_PARAM_RES:
-        m = rx.search(stderr)
-        if m:
-            return m.group(1)
-    if any(tok in stderr.lower() for tok in ("unknown parameter", "invalid parameter", "unknown option")):
-        return "<unparsed>"
-    return None
-
-
-def run_z3(smt2_path, params, timeout_s, z3_bin="z3"):
+def run_z3(smt2_path, params, timeout_s, python_bin=None, cpu_core=None):
     """
-    Returns dict:
-      success: {"result": "Sat"|"Unsat"|"Unknown", "elapsed_ms": int}
-      timeout: {"result": "Unknown", "elapsed_ms": int, "timeout": True}
-      invalid: {"invalid_param": str, "stderr": str, "result": "Unknown", "elapsed_ms": int}
-      crash:   {"result": "Unknown", "elapsed_ms": int, "error": str, "stderr": str}
-    """
-    if shutil.which(z3_bin) is None:
-        return {"result": "Unknown", "elapsed_ms": 0, "error": f"z3 binary not found: {z3_bin}"}
+    Returns dict (one of):
+      success: {"result": "Sat"|"Unsat"|"Unknown", "elapsed_ms": int, "stats": dict}
+      timeout: {"result": "Unknown", "elapsed_ms": int, "timeout": True, "stats": {}}
+      invalid: {"invalid_param": str, "stderr": str, "result": "Unknown", "elapsed_ms": int, "stats": {}}
+      crash:   {"result": "Unknown", "elapsed_ms": int, "error": str, "stderr": str, "stats": {}}
 
-    args = [z3_bin, f"-T:{int(timeout_s)}", "-smt2"]
-    for k, v in params.items():
-        args.append(f"{k}={_format_value(v)}")
-    args.append(str(smt2_path))
+    "stats" mirrors z3 Optimize.statistics() numeric entries (decisions,
+    propagations, conflicts, restarts, arith/bv counters, ...). Empty when
+    z3 never reached check() (param error, parse fail, timeout, crash).
+
+    cpu_core: optional int — if given and `taskset` is on PATH, pin the
+    worker subprocess to that core (-c <N>). Used by the parallel dispatch
+    in evaluator.py to isolate concurrent z3 runs from cross-core
+    interference. Silently ignored if taskset missing (macOS / no util-linux).
+    """
+    py = python_bin or sys.executable
+    args = [py, _WORKER, json.dumps(params), str(smt2_path), str(int(timeout_s))]
+    if cpu_core is not None and _TASKSET:
+        args = [_TASKSET, "-c", str(int(cpu_core))] + args
 
     t0 = time.monotonic()
     try:
@@ -54,38 +50,48 @@ def run_z3(smt2_path, params, timeout_s, z3_bin="z3"):
             args,
             capture_output=True,
             text=True,
-            timeout=timeout_s + 10,
+            timeout=timeout_s + 15,  # grace for z3 startup + parse
         )
     except subprocess.TimeoutExpired:
         return {
             "result": "Unknown",
-            "elapsed_ms": int(timeout_s * 1000),
+            "elapsed_ms": int((time.monotonic() - t0) * 1000),
             "timeout": True,
+            "stats": {},
         }
 
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
 
-    bad = detect_invalid_param(stderr)
-    if bad:
+    if not stdout:
         return {
-            "invalid_param": bad,
+            "result": "Unknown",
+            "elapsed_ms": int((time.monotonic() - t0) * 1000),
+            "error": f"worker produced no output (rc={proc.returncode})",
             "stderr": stderr[-2000:],
-            "result": "Unknown",
-            "elapsed_ms": elapsed_ms,
+            "stats": {},
         }
 
-    m = _RESULT_RE.search(stdout)
-    if not m:
+    # Use the last non-empty line as JSON (defensive against stray prints).
+    last = stdout.splitlines()[-1]
+    try:
+        out = json.loads(last)
+    except json.JSONDecodeError as e:
         return {
             "result": "Unknown",
-            "elapsed_ms": elapsed_ms,
-            "error": f"no result token (rc={proc.returncode})",
-            "stderr": stderr[-1000:],
+            "elapsed_ms": int((time.monotonic() - t0) * 1000),
+            "error": f"worker json decode: {e}",
+            "stderr": (stderr + "\n--stdout--\n" + stdout)[-2000:],
+            "stats": {},
         }
 
-    return {
-        "result": {"sat": "Sat", "unsat": "Unsat", "unknown": "Unknown"}[m.group(1)],
-        "elapsed_ms": elapsed_ms,
-    }
+    if "invalid_param" in out:
+        return {
+            "invalid_param": out["invalid_param"],
+            "stderr": (out.get("error") or stderr)[-2000:],
+            "result": "Unknown",
+            "elapsed_ms": out.get("elapsed_ms", 0),
+            "stats": {},
+        }
+    out.setdefault("stats", {})
+    return out

@@ -1,7 +1,16 @@
 # Shared OpenEvolve config for all Z3 tuning phases.
 # Per-phase iteration count is set in run_phase.sh.
+#
+# === Custom z3-bench knobs (silently ignored by openevolve dacite parser) ===
+# parallel_solvers: total concurrent z3 worker subprocesses per stage.
+#   - Read by shared/evaluator.py, rebaseline_local.py, baseline_params self-test.
+#   - Each pinned to a dedicated core via taskset (Linux).
+#   - Capped at len(problems_in_stage) at runtime.
+#   - Env OPENEVOLVE_PARALLEL_SOLVERS overrides this value.
+#   - Total RAM ≈ N × 4 GB worst-case — size per host.
+parallel_solvers: 1
 
-max_iterations: 100
+max_iterations: 20
 checkpoint_interval: 10
 log_level: "INFO"
 random_seed: 42
@@ -14,14 +23,18 @@ convergence_threshold: 0.001
 early_stopping_metric: "combined_score"
 
 llm:
-  primary_model: "gemini-2.5-flash"
-  primary_model_weight: 0.8
-  secondary_model: "gemini-2.5-pro"
-  secondary_model_weight: 0.2
-  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
-  temperature: 0.7
-  max_tokens: 16000
-  timeout: 180
+  models:
+    - name: "claude-sonnet-4-6"
+      provider: "claude_code"
+      weight: 0.8
+      timeout: 180
+      retries: 2
+      retry_delay: 10
+      reasoning_effort: "medium"
+    - name: "claude-haiku-4-5"
+      provider: "claude_code"
+      weight: 0.2
+      timeout: 120
 
 prompt:
   system_message: |
@@ -67,6 +80,10 @@ database:
   similarity_threshold: 0.95
 
 evaluator:
-  timeout: 1800              # 30 min cap per variant (stage2 fallback)
-  cascade_thresholds: [0.3]  # need stage1 score >= 0.3 to enter stage2
-  parallel_evaluations: 1    # z3 memory-heavy (up to 4 GB observed); raise carefully
+  timeout: 300               # 5 min cap per variant (stage1 only: 5 problems × 24s)
+  cascade_evaluation: false  # stage2 reserved for final_verify.py, not per-variant search
+  parallel_evaluations: 1    # FIXED 1 — variant pool kept serial. All z3 concurrency
+                             # is controlled by env OPENEVOLVE_PARALLEL_SOLVERS (inner
+                             # ThreadPool that runs N stage-problems concurrently per
+                             # variant). Single knob avoids RAM blow-up from
+                             # parallel_evaluations × OPENEVOLVE_PARALLEL_SOLVERS.

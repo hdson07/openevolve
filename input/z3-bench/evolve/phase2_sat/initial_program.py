@@ -56,14 +56,13 @@ SAT_OVERRIDES = {
     "sat.gc.k": 7,
     "sat.gc.small_lbd": 3,
     "sat.minimize_lemmas": True,
-    "sat.dyn.sub_res": True,
+    # sat.dyn.sub_res: not in z3 4.13.3.0 — removed.
 
     # Preprocessing / simplification
     "sat.scc": True,
     "sat.scc.tr": True,
     "sat.elim_vars": True,
-    "sat.elim_vars_bdd": True,
-    "sat.elim_vars_bdd_delay": 3,
+    # sat.elim_vars_bdd / sat.elim_vars_bdd_delay: not in z3 4.13.3.0 — removed.
     "sat.subsumption": True,
     "sat.subsumption.limit": 100000000,
     "sat.asymm_branch": True,
@@ -84,7 +83,7 @@ SAT_OVERRIDES = {
     "sat.bce_at": 2,
     "sat.bce_delay": 2,
     "sat.bca": False,
-    "sat.binspr": False,
+    # sat.binspr: not in z3 4.13.3.0 — removed.
     "sat.cce": False,
     "sat.blocked_clause_limit": 100000000,
     "sat.retain_blocked_clauses": True,
@@ -92,7 +91,7 @@ SAT_OVERRIDES = {
     "sat.force_cleanup": False,
     "sat.inprocess.max": 4294967295,
     "sat.simplify.delay": 0,
-    "sat.next_simplify1": 30000,
+    # sat.next_simplify1: not in z3 4.13.3.0 — removed.
 
     # Cardinality / PB
     "sat.cardinality.solver": True,

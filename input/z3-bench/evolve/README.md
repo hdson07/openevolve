@@ -299,6 +299,47 @@ export OPENAI_API_KEY="..."           # config.yaml의 api_base에 맞는 키
 
 `OPENAI_API_KEY`라는 이름은 OpenEvolve가 OpenAI 호환 SDK를 쓰기 때문. 실제 라우팅은 `config.yaml`의 `api_base`가 결정.
 
+### Claude Code 백엔드 사용 시
+
+`config.yaml`에서 `provider: claude_code`로 모델을 정의하면 (`configs/claude_code_example.yaml` 참고) API 키 대신 Claude Code 구독 인증을 쓸 수 있다. Docker 안에서 쓰려면:
+
+1. **Host에서 (1회만)**: long-lived OAuth 토큰 생성
+   ```bash
+   claude setup-token                # 출력된 토큰 복사
+   export CLAUDE_CODE_OAUTH_TOKEN="sk-..."
+   ```
+   macOS는 OAuth credential을 Keychain에 저장하므로 `~/.claude/` 마운트만으로는 인증 안 됨. 토큰 방식이 필수.
+
+2. **docker-run.sh 실행**: 위 env var가 export 되어 있으면 자동 전달 + `~/.claude/` 마운트 (settings/sessions 공유).
+   ```bash
+   ./docker-run.sh dev -s z3evo
+   ```
+
+3. **Container 안 (1회만)**: `claude` CLI 설치. axion 이미지에는 Node.js/npm 없음 → Anthropic 공식 standalone installer 사용 (Node 번들, 시스템 의존성 없음).
+   ```bash
+   curl -fsSL https://claude.ai/install.sh | bash
+   # 설치 위치: ~/.local/bin/claude
+   export PATH="$HOME/.local/bin:$PATH"   # ~/.bashrc에 영구 추가 권장
+   claude --version                       # sanity check
+   pip install -e ".[claude-code]"        # claude-agent-sdk
+   ```
+   SDK 탐색 순서: `~/.npm-global/bin/claude` → `/usr/local/bin/claude` → `~/.local/bin/claude` → `~/.claude/local/claude` → PATH. 위 경로 그대로 작동.
+
+   **설치 영속화**: 컨테이너는 `--rm`이라 종료 시 사라지지만 docker-run.sh가 `~/.axion-docker-persist/claude-local/`을 `/root/.local`로 마운트 → 한 번 설치하면 다음 컨테이너에서도 그대로 사용 가능.
+
+   **host 차이**:
+   - Linux host: docker-run.sh가 host `claude` 바이너리도 자동 마운트 (`/usr/local/bin/claude` ro) → installer 생략 가능.
+   - Mac host: cross-OS 불가 → 위 installer 필수.
+
+   **HOME 분리**: `~/.claude/`가 host에서 마운트되므로 host config 공유됨. 충돌 우려 시 컨테이너 안에서 `CLAUDE_CONFIG_DIR` 등 별도 path 지정.
+
+4. **체크**: 인증 작동 여부
+   ```bash
+   python -c "from openevolve.llm.claude_code import ClaudeCodeLLM; print('ok')"
+   ```
+
+**주의**: Claude Pro/Max 구독은 5시간 윈도우 rate limit 있음. 큰 evolution run은 빠르게 막힘. 작은 iteration으로 검증 먼저.
+
 ### Container 안
 
 ```bash

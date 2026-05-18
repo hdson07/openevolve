@@ -26,8 +26,7 @@ OPT_SLS_OVERRIDES = {
     "opt.enable_sat": True,
     "opt.enable_sls": True,
     "opt.enable_core_rotate": True,
-    "opt.enable_lns": False,
-    "opt.lns.threshold": 4,
+    # opt.enable_lns / opt.lns.threshold: not in z3 4.13.3.0 — removed.
     "opt.maxres.hill_climb": True,
     "opt.maxres.add_upper_bound_block": False,
     "opt.maxres.max_core_size": 3,
@@ -50,7 +49,7 @@ OPT_SLS_OVERRIDES = {
     "sls.walksat_ucb_init": False,
     "sls.walksat_ucb_noise": 0.0002,
     "sls.wp": 20,                               # walk probability (percent 0..100)
-    "sls.parallel": False,
+    # sls.parallel: API-only key (z3 CLI rejects); pinned to default False.
     "sls.random_offset": True,
     "sls.rescore": True,
     "sls.restart_base": 100,
