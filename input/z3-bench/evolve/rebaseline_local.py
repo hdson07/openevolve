@@ -73,6 +73,7 @@ def main():
             return 2
         tasks.append((i, meta, smt2_path))
 
+    import queue as _queue
     n_parallel = min(parallel_solvers(default=1), len(tasks))
     print(f"rebaselining stage1 evolution sample: {len(tasks)} problems "
           f"(from stage1_sample.json)")
@@ -80,12 +81,22 @@ def main():
           f"(taskset core pin)")
     print()
 
+    # Cores leased from a queue so each in-flight task holds a unique slot.
+    # Serial mode also leases core 0 (symmetric with parallel) — keeps the
+    # baseline measurement under the same pin envelope variants will see.
+    _core_pool = _queue.Queue()
+    for _c in range(n_parallel):
+        _core_pool.put(_c)
+
     def _solve(task):
         i, meta, smt2_path = task
         timeout_s = max(60, math.ceil(meta["raw_ms"] * 2 / 1000))
-        core = (i % n_parallel) if n_parallel > 1 else None
-        res = run_z3(smt2_path, BASELINE, timeout_s, cpu_core=core)
-        return i, meta, res
+        core = _core_pool.get()
+        try:
+            res = run_z3(smt2_path, BASELINE, timeout_s, cpu_core=core)
+        finally:
+            _core_pool.put(core)
+        return i, meta, res, core
 
     t_start = time.monotonic()
     completed = []
@@ -101,7 +112,7 @@ def main():
 
     out = {}
     mismatch = 0
-    for i, meta, res in completed:
+    for i, meta, res, core in completed:
         got_result = res.get("result", "Unknown")
         got_ms = int(res.get("elapsed_ms", 0))
         ok = (got_result == meta["raw_result"])
@@ -110,11 +121,11 @@ def main():
 
         flag = "" if ok else "  MISMATCH"
         ratio = got_ms / max(meta["raw_ms"], 1)
-        core_tag = f"  core={i % n_parallel}" if n_parallel > 1 else ""
         print(
             f"  [{i+1:>2}/{len(tasks)}] {meta['sha'][:10]}  "
             f"raw={meta['raw_result']:<7}/{meta['raw_ms']:>7}ms  "
-            f"local={got_result:<7}/{got_ms:>7}ms  ratio={ratio:.2f}x{flag}{core_tag}",
+            f"local={got_result:<7}/{got_ms:>7}ms  ratio={ratio:.2f}x{flag}  "
+            f"core={core}",
             flush=True,
         )
 

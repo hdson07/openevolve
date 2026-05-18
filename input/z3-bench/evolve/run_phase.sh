@@ -1,31 +1,58 @@
 #!/bin/bash
 # Run one phase of Z3 parameter evolution.
-# Usage: ./run_phase.sh {1|2|3|4} [extra openevolve-run.py flags...]
+# Usage:
+#   ./run_phase.sh {1|2|3|4} [extra openevolve-run.py flags...]
+#   ./run_phase.sh {1|2|3} --extract-only        # skip evolution; aggregate
+#                                                # results from existing
+#                                                # openevolve_output/checkpoints/
 #
-# Phase iterations are set per-phase below. Override via --iterations <N>.
+# Iteration count comes from config.yaml (max_iterations). Override via
+# `--iterations <N>` extra flag if needed.
 # OpenEvolve outputs land in <phase_dir>/openevolve_output/.
 
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-    echo "usage: $0 {1|2|3|4} [extra flags]" >&2
+    echo "usage: $0 {1|2|3|4} [--extract-only] [extra flags]" >&2
     exit 2
 fi
 
 PHASE="$1"
 shift
 
+EXTRACT_ONLY=0
+PASSTHROUGH=()
+for arg in "$@"; do
+    case "$arg" in
+        --extract-only) EXTRACT_ONLY=1 ;;
+        *) PASSTHROUGH+=("$arg") ;;
+    esac
+done
+set -- "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+
 case "$PHASE" in
-    1) DIR="phase1_opt_sls"; ITERS=80  ;;
-    2) DIR="phase2_sat";     ITERS=150 ;;
-    3) DIR="phase3_smt";     ITERS=120 ;;
-    4) DIR="phase4_unified"; ITERS=60  ;;
+    1) DIR="phase1_opt_sls" ;;
+    2) DIR="phase2_sat"     ;;
+    3) DIR="phase3_smt"     ;;
+    4) DIR="phase4_unified" ;;
     *) echo "phase must be 1, 2, 3, or 4 (got $PHASE)" >&2; exit 2 ;;
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$ROOT/../../.." && pwd)"
 RUNNER="$REPO_ROOT/openevolve-run.py"
+
+# --extract-only: skip evolution + setup, jump straight to aggregation.
+if [ "$EXTRACT_ONLY" = "1" ]; then
+    if [ "$PHASE" -eq 4 ]; then
+        echo "--extract-only not supported for phase 4 (no extract step)" >&2
+        exit 2
+    fi
+    echo "[run_phase] --extract-only: aggregating from checkpoints (phase $PHASE)..."
+    python "$ROOT/extract_best.py" "$PHASE" --from-checkpoints
+    echo "[run_phase] extract-only done. next: $0 $((PHASE + 1))"
+    exit 0
+fi
 
 if [ ! -f "$RUNNER" ]; then
     echo "openevolve-run.py not found at $RUNNER" >&2
@@ -37,8 +64,14 @@ if [ ! -f "$ROOT/shared/stage1_sample.json" ]; then
     python "$ROOT/build_stage1_sample.py"
 fi
 
-if [ ! -f "$ROOT/shared/local_baseline.json" ]; then
-    echo "local_baseline.json missing — running rebaseline_local.py first (~5 min, 20 problems)..."
+if [ "${SKIP_REBASELINE:-0}" = "1" ] && [ -f "$ROOT/shared/local_baseline.json" ]; then
+    echo "SKIP_REBASELINE=1 set — reusing existing local_baseline.json"
+elif [ "${SKIP_REBASELINE:-0}" = "1" ]; then
+    echo "SKIP_REBASELINE=1 set but local_baseline.json missing — running rebaseline_local.py..."
+    python "$ROOT/rebaseline_local.py" || \
+        echo "warning: rebaseline_local.py finished with mismatches; evaluator will fall back to raw_ms for those."
+else
+    echo "running rebaseline_local.py (~5 min, 20 problems)... set SKIP_REBASELINE=1 to skip"
     python "$ROOT/rebaseline_local.py" || \
         echo "warning: rebaseline_local.py finished with mismatches; evaluator will fall back to raw_ms for those."
 fi
@@ -60,13 +93,12 @@ if [ "$PHASE" -eq 4 ]; then
 fi
 
 cd "$ROOT/$DIR"
-echo "[run_phase] phase=$PHASE dir=$DIR iters=$ITERS cwd=$(pwd)"
+echo "[run_phase] phase=$PHASE dir=$DIR cwd=$(pwd) (iterations from config.yaml)"
 
 python "$RUNNER" \
     initial_program.py \
     "$ROOT/shared/evaluator.py" \
     --config "$ROOT/config.yaml" \
-    --iterations "$ITERS" \
     "$@"
 
 echo "[run_phase] phase $PHASE finished."

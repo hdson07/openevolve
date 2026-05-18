@@ -184,17 +184,28 @@ def _evaluate(program_path, problems, per_problem_timeout_s, stage_name):
     # Parallel dispatch — `OPENEVOLVE_PARALLEL_SOLVERS` controls how many
     # z3 worker subprocesses run concurrently for the stage's problem list.
     # Worker count is capped at len(problems) (no point spawning idle threads).
-    # Each task is pinned to core (i % N) via taskset (Linux) so concurrent
-    # runs don't fight for the same physical core. Default 1 = sequential.
+    # Cores are leased from a queue.Queue so each in-flight task holds a
+    # unique core slot. This is correct even when len(problems) > n_parallel
+    # (idx % n_parallel would collide across workers). Serial mode also
+    # leases core 0 — symmetric with parallel so baseline / variant share
+    # the same pin envelope (no parallel=1-unpinned vs parallel=N-pinned
+    # bias). Default 1 = sequential, single slot.
+    import queue as _queue
     n_parallel = min(parallel_solvers(default=1), len(problems))
+    _core_pool = _queue.Queue()
+    for _c in range(n_parallel):
+        _core_pool.put(_c)
 
     def _solve(idx_p):
         idx, p = idx_p
         smt2_path = _RAW_DIR / p["smt2"]
-        core = (idx % n_parallel) if n_parallel > 1 else None
-        r = run_z3(smt2_path, params, per_problem_timeout_s,
-                   python_bin=_PYTHON_BIN, cpu_core=core)
-        return idx, p, r
+        core = _core_pool.get()
+        try:
+            r = run_z3(smt2_path, params, per_problem_timeout_s,
+                       python_bin=_PYTHON_BIN, cpu_core=core)
+        finally:
+            _core_pool.put(core)
+        return idx, p, r, core
 
     def _is_regression(p, r):
         # Correctness regression: baseline gave a definitive answer (Sat/Unsat)
@@ -246,9 +257,10 @@ def _evaluate(program_path, problems, per_problem_timeout_s, stage_name):
     if n_parallel == 1:
         # Sequential: short-circuit immediately on invalid or regression.
         for pair in enumerate(problems):
-            idx, p, r = _solve(pair)
+            idx, p, r, core = _solve(pair)
             print(f"  [{stage_name}] {idx+1}/{len(problems)} {p['sha'][:10]} "
-                  f"{r.get('result')} {r.get('elapsed_ms')}ms", flush=True)
+                  f"{r.get('result')} {r.get('elapsed_ms')}ms "
+                  f"(core={core})", flush=True)
             if "invalid_param" in r:
                 return _invalid_err(r)
             if _is_regression(p, r):
@@ -266,8 +278,7 @@ def _evaluate(program_path, problems, per_problem_timeout_s, stage_name):
             for fut in as_completed(futures):
                 if abort is not None:
                     continue
-                idx, p, r = fut.result()
-                core = idx % n_parallel
+                idx, p, r, core = fut.result()
                 print(f"  [{stage_name}] {idx+1}/{len(problems)} {p['sha'][:10]} "
                       f"{r.get('result')} {r.get('elapsed_ms')}ms "
                       f"(core={core})", flush=True)
