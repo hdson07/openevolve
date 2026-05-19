@@ -1,15 +1,17 @@
 """
-Init-phase rebaseline: measure BASELINE elapsed_ms on the stage1 evolution
-sample (shared/stage1_sample.json) and write shared/local_baseline.json.
+Init-phase rebaseline: measure BASELINE elapsed_ms on the union of
+stage1_sample.json + stage2_sample.json (10 SHAs total) and write
+shared/local_baseline.json.
 
 Wall-clock varies by hardware / z3 version. Raw-data baseline_ms was recorded
 on a different machine, so comparing against it gives misleading speedup.
 evaluator._load_problems overlays this local file onto raw data so that
 speedup = local_baseline_ms / variant_elapsed_ms.
 
-Only the stage1 evolution sample is rebaselined here — fast (~30s with
-parallel=5) and matches what the evolve loop actually sees. Final verification
-uses a separate larger sample via final_verify.py, which rebaselines on the fly.
+Stage1+stage2 are rebaselined — both feed the evolve loop (stage1 fast
+triage, stage2 medium-slow regression check). Stage3 (50 SHAs, broad
+size-distribution) is NOT rebaselined here because final_verify.py
+re-measures baseline on the fly per problem.
 
 Per-problem: 1 run, timeout = max(60s, raw_baseline_ms * 2 / 1000).
 Concurrency = config parallel_solvers (env OPENEVOLVE_PARALLEL_SOLVERS override).
@@ -32,6 +34,7 @@ _BENCH_DIR = _HERE.parent
 _RAW_DIR = _BENCH_DIR / "raw-data"
 _PROBLEMS_JSONL = _BENCH_DIR / "problems.jsonl"
 _STAGE1_SAMPLE = _HERE / "shared" / "stage1_sample.json"
+_STAGE2_SAMPLE = _HERE / "shared" / "stage2_sample.json"
 _OUT = _HERE / "shared" / "local_baseline.json"
 
 
@@ -49,16 +52,30 @@ def _load_problem_index():
     return idx
 
 
-def _load_stage1_shas():
+def _load_target_shas():
+    # Rebaseline stage1 + stage2 (10 SHAs total). Stage3 (50) is skipped —
+    # final_verify.py rebaselines on the fly per-problem and the cost of
+    # rebaselining 50 with multi-min runtimes is too high for routine setup.
     if not _STAGE1_SAMPLE.exists():
         print(f"ERROR: {_STAGE1_SAMPLE} missing — run build_samples.py first",
               file=sys.stderr)
         sys.exit(2)
-    return list(json.loads(_STAGE1_SAMPLE.read_text())["sha256"])
+    shas = list(json.loads(_STAGE1_SAMPLE.read_text())["sha256"])
+    if _STAGE2_SAMPLE.exists():
+        s2 = json.loads(_STAGE2_SAMPLE.read_text())["sha256"]
+        seen = set(shas)
+        for sha in s2:
+            if sha not in seen:
+                shas.append(sha)
+                seen.add(sha)
+    else:
+        print(f"WARN: {_STAGE2_SAMPLE} missing — rebaselining stage1 only",
+              file=sys.stderr)
+    return shas
 
 
 def main():
-    shas = _load_stage1_shas()
+    shas = _load_target_shas()
     idx = _load_problem_index()
 
     tasks = []
@@ -75,8 +92,8 @@ def main():
 
     import queue as _queue
     n_parallel = min(parallel_solvers(default=1), len(tasks))
-    print(f"rebaselining stage1 evolution sample: {len(tasks)} problems "
-          f"(from stage1_sample.json)")
+    print(f"rebaselining stage1+stage2 evolution samples: {len(tasks)} problems "
+          f"(union of stage1_sample.json + stage2_sample.json)")
     print(f"timeout per problem = max(60s, raw_ms * 2), parallel={n_parallel} "
           f"(taskset core pin)")
     print()

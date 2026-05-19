@@ -59,6 +59,7 @@ _RAW_DIR = _BENCH_DIR / "raw-data"
 _PROBLEMS_JSONL = _BENCH_DIR / "problems.jsonl"
 _STAGE1_SAMPLE = _HERE / "stage1_sample.json"
 _STAGE2_SAMPLE = _HERE / "stage2_sample.json"
+_STAGE3_SAMPLE = _HERE / "stage3_sample.json"
 _LOCAL_BASELINE = _HERE / "local_baseline.json"
 
 _PYTHON_BIN = os.environ.get("OPENEVOLVE_PYTHON_BIN")  # None -> sys.executable
@@ -115,13 +116,21 @@ def _filter_stage1(problems):
 
 
 def _filter_stage2(problems):
-    # stage2_sample.json pins a deterministic 50-problem subset built by
-    # build_samples.py (quintile-spread by num_hard_constraints, num_variables).
-    # raw-data may exceed 50; without this filter, stage2 cost grows
-    # unbounded as raw-data accumulates.
+    # stage2_sample.json: 5 SAT problems from the runtime upper-half
+    # (medium-slow). Catches regressions on harder instances.
     if not _STAGE2_SAMPLE.exists():
         return problems
     keep = set(json.loads(_STAGE2_SAMPLE.read_text())["sha256"])
+    return [p for p in problems if p["sha"] in keep]
+
+
+def _filter_stage3(problems):
+    # stage3_sample.json: 50 SAT+UNSAT problems, size-stratified broad
+    # coverage. raw-data may exceed 50; without this filter, stage3 cost
+    # grows unbounded as raw-data accumulates.
+    if not _STAGE3_SAMPLE.exists():
+        return problems
+    keep = set(json.loads(_STAGE3_SAMPLE.read_text())["sha256"])
     return [p for p in problems if p["sha"] in keep]
 
 
@@ -286,13 +295,18 @@ def _evaluate(program_path, problems, stage_name):
                 return _regression_err(p, r)
             by_idx[idx] = (p, r)
     else:
-        # Parallel: cancel pending futures on first failure. In-flight tasks
-        # keep running until subprocess timeout (with __exit__ waits for them).
-        # Per-problem timeout is now baseline_ms * 1.3 (adaptive), so worst-case
+        # Parallel: LPT (longest-processing-time) submission — sort problems
+        # by baseline_ms descending so big jobs dispatch first. ThreadPool's
+        # internal FIFO queue then drains small jobs onto whichever worker
+        # frees up, minimising tail idle time when n_parallel < len(problems).
+        # Cancel pending futures on first failure; in-flight tasks keep
+        # running until subprocess timeout (with __exit__ waits for them).
+        # Per-problem timeout is baseline_ms * 1.3 (adaptive), so worst-case
         # drain depends on the slowest in-flight problem rather than a fixed cap.
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        ordered = sorted(enumerate(problems), key=lambda ip: -ip[1]["baseline_ms"])
         with ThreadPoolExecutor(max_workers=n_parallel) as ex:
-            futures = [ex.submit(_solve, pair) for pair in enumerate(problems)]
+            futures = [ex.submit(_solve, pair) for pair in ordered]
             for fut in as_completed(futures):
                 if abort is not None:
                     continue
@@ -381,6 +395,11 @@ def evaluate_stage1(program_path):
 def evaluate_stage2(program_path):
     problems = _filter_stage2(_load_problems())
     return _evaluate(program_path, problems, "stage2")
+
+
+def evaluate_stage3(program_path):
+    problems = _filter_stage3(_load_problems())
+    return _evaluate(program_path, problems, "stage3")
 
 
 def evaluate(program_path):

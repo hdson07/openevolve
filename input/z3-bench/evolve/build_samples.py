@@ -1,25 +1,27 @@
 """
-Build problems.jsonl + stage1_sample.json + stage2_sample.json from raw-data.
+Build problems.jsonl + stage1/2/3 sample files from raw-data.
 
 Source of truth = raw-data/*.meta.jsonl. raw-data accumulates over time;
-this script (re)scans the directory each run, rewrites problems.jsonl as the
-full aggregate, and re-selects stage1 / stage2 samples.
+this script rescans each run, rewrites problems.jsonl as the full aggregate,
+and re-selects all stage samples.
 
-Size metric: (num_hard_constraints, num_variables) tuple ascending — primary
-then tiebreak. Runtime (elapsed_ms) is NOT used for selection.
+Sample pool cap: baseline_ms <= MAX_BASELINE_MS (5 min). problems.jsonl
+still contains the full set; only sample selection applies the cap.
 
-Sample pool cap: baseline_ms <= MAX_BASELINE_MS (5 min). Excludes monster
-problems where even baseline times out under reasonable per-iteration
-budgets. problems.jsonl still contains the full set; only sample selection
-applies the cap.
+Stage1 (5):  SAT, runtime lower-half (fast-medium). Quintile-spread by
+             baseline_ms within the half. Drives the fast evolve loop —
+             keeps per-iteration wall-clock bounded.
+Stage2 (5):  SAT, runtime upper-half (medium-slow) capped at
+             STAGE2_MAX_MS (2 min). Quintile-spread by baseline_ms within
+             the capped pool. Catches regressions on harder instances
+             without letting stage2 wall-clock blow up.
+Stage3 (50): SAT+UNSAT, quintile-spread by size
+             (num_hard_constraints, num_variables). Broad coverage for
+             final verification / full-dataset scoring.
 
-Stage1 (5):  SAT-only, quintile-spread by size (5 buckets, 1 per bucket).
-Stage2 (50): SAT + UNSAT, quintile-spread by size (5 buckets, 10 per bucket
-             rank-linspace within bucket).
-
-Quintile-spread = stable, deterministic ordering by rank then equal-density
-sampling per bucket. Guarantees representation across the size distribution
-rather than clustering on fastest / smallest problems.
+Quintile-spread = sort by key, split into 5 equal-rank buckets, pick N/5
+from each bucket via rank-linspace within bucket. Deterministic, no
+randomness.
 """
 import json
 import pathlib
@@ -30,11 +32,14 @@ _RAW = _BENCH / "raw-data"
 _PROBLEMS = _BENCH / "problems.jsonl"
 _STAGE1 = _HERE / "shared" / "stage1_sample.json"
 _STAGE2 = _HERE / "shared" / "stage2_sample.json"
+_STAGE3 = _HERE / "shared" / "stage3_sample.json"
 
 STAGE1_N = 5
-STAGE2_N = 50
+STAGE2_N = 5
+STAGE3_N = 50
 N_BUCKETS = 5
 MAX_BASELINE_MS = 300_000  # 5 min cap — exclude monster problems from sample pool
+STAGE2_MAX_MS = 120_000    # 2 min cap — stage2 wall must stay bounded
 
 
 def _scan_raw():
@@ -53,6 +58,10 @@ def _scan_raw():
 def _size_key(d):
     feats = d.get("features") or {}
     return (feats.get("num_hard_constraints", 0), feats.get("num_variables", 0))
+
+
+def _runtime_key(d):
+    return (d.get("z3_status") or {}).get("elapsed_ms", 0)
 
 
 def _quintile_spread(sorted_rows, n_pick, n_buckets=N_BUCKETS):
@@ -131,19 +140,29 @@ def main():
     print(f"sample pool: {len(candidates)} (skipped {skipped} with "
           f"baseline_ms > {MAX_BASELINE_MS}ms)")
 
-    sat = sorted(
+    # Stage1/2: SAT only, split by runtime median.
+    sat_by_rt = sorted(
         (d for d in candidates if (d.get("z3_status") or {}).get("result") == "Sat"),
-        key=_size_key,
+        key=_runtime_key,
     )
-    all_sorted = sorted(candidates, key=_size_key)
+    half = len(sat_by_rt) // 2
+    sat_lower = sat_by_rt[:half]              # fast-medium runtime
+    sat_upper = sat_by_rt[half:]              # medium-slow runtime
+    sat_upper_capped = [d for d in sat_upper if _runtime_key(d) <= STAGE2_MAX_MS]
+    print(f"stage2 pool: {len(sat_upper_capped)} (capped at {STAGE2_MAX_MS}ms, "
+          f"dropped {len(sat_upper) - len(sat_upper_capped)} from upper-half)")
 
-    s1 = _quintile_spread(sat, STAGE1_N, N_BUCKETS)
-    s2 = _quintile_spread(all_sorted, STAGE2_N, N_BUCKETS)
+    s1 = _quintile_spread(sat_lower, STAGE1_N, N_BUCKETS)
+    s2 = _quintile_spread(sat_upper_capped, STAGE2_N, N_BUCKETS)
 
-    _write_sample(_STAGE1, s1, "stage1", "SAT-only")
-    _write_sample(_STAGE2, s2, "stage2", "SAT+UNSAT")
+    # Stage3: SAT+UNSAT, quintile-spread by problem size (broad coverage).
+    s3 = _quintile_spread(sorted(candidates, key=_size_key), STAGE3_N, N_BUCKETS)
 
-    for label, picks in (("stage1", s1), ("stage2", s2)):
+    _write_sample(_STAGE1, s1, "stage1", "SAT runtime lower-half")
+    _write_sample(_STAGE2, s2, "stage2", "SAT runtime upper-half")
+    _write_sample(_STAGE3, s3, "stage3", "SAT+UNSAT broad-size")
+
+    for label, picks in (("stage1", s1), ("stage2", s2), ("stage3", s3)):
         print(f"\n{label}:")
         for d in picks:
             f_ = d.get("features") or {}
