@@ -18,14 +18,20 @@ distort quintile boundaries and inflate stage3/4 wall-clock.
 Runtime quintiles (SAT-only, sorted by elapsed_ms ascending):
   Q1 = bottom 20%, Q2 = 20-40%, ..., Q5 = top 20%.
 
-Stage1 (5):  SAT, quintiles 1+2 (fastest 40%). Quintile-spread within pool.
+Stage1 (5):  SAT, quintiles 1+2 (fastest 40%). Strategy: STAGE1_STRATEGY.
              Cascade gate: geomean_speedup >= 1.03 → stage2.
-Stage2 (5):  SAT, quintiles 3+4 (middle 40-80%). Quintile-spread within pool.
+Stage2 (5):  SAT, quintiles 3+4 (middle 40-80%). Strategy: STAGE2_STRATEGY.
              Cascade gate: geomean_speedup >= 1.03 → stage3.
-Stage3 (5):  SAT, quintile 5 (slowest 20%). Quintile-spread within pool.
+Stage3 (5):  SAT, quintile 5 (slowest 20%). Strategy: STAGE3_STRATEGY.
              Cascade gate: geomean_speedup >= 1.03 → stage4.
-Stage4 (20): SAT+UNSAT, broad runtime-spread, deduplicated against
-             stage1+2+3. Final cascade gate / scoring sample.
+Stage4 (20): SAT+UNSAT, broad. Strategy: STAGE4_STRATEGY. Deduplicated
+             against stage1+2+3.
+
+Strategies (STAGE{N}_STRATEGY):
+  "center" : pick N contiguous elements around the median of the pool.
+             Tight within-stage runtime variance (~2-3x).
+  "spread" : quintile-spread across the pool (N/N_BUCKETS per bucket via
+             rank-linspace). Intentionally wide distribution.
 
 Quintile-spread = sort by key, split into N_BUCKETS equal-rank buckets,
 pick N/N_BUCKETS from each bucket via rank-linspace within bucket.
@@ -51,6 +57,14 @@ N_BUCKETS = 5
 MAX_BASELINE_MS = 300_000  # 5 min cap — exclude monster problems from sample pool
 OUTLIER_IQR_K = 3.0         # linear Tukey k (k=1.5=outlier, k=3=far outlier).
                             # k=3 drops only extreme tails (e.g. 181s, 132s vs ~13s median).
+
+# Per-stage selection strategy. "center" = contiguous N picks around median
+# (tight within-stage runtime variance); "spread" = quintile-spread across
+# whole pool (intentionally wide distribution).
+STAGE1_STRATEGY = "center"
+STAGE2_STRATEGY = "center"
+STAGE3_STRATEGY = "center"
+STAGE4_STRATEGY = "spread"
 
 
 def _scan_raw():
@@ -95,6 +109,30 @@ def _drop_runtime_outliers(rows, k=OUTLIER_IQR_K):
         else:
             dropped.append(d)
     return kept, dropped
+
+
+def _pick(strategy, sorted_rows, n_pick):
+    if strategy == "center":
+        return _center_pick(sorted_rows, n_pick)
+    if strategy == "spread":
+        return _quintile_spread(sorted_rows, n_pick, N_BUCKETS)
+    raise ValueError(f"unknown sample strategy: {strategy!r}")
+
+
+def _center_pick(sorted_rows, n_pick):
+    """
+    Pick n_pick contiguous elements centered on the median of sorted_rows.
+    Used for stage1/2/3 where samples should cluster tightly (similar runtime)
+    rather than span the whole pool — reduces within-stage variance to ~2-3x
+    instead of 5-8x.
+    """
+    total = len(sorted_rows)
+    if total == 0 or n_pick <= 0:
+        return []
+    if total <= n_pick:
+        return list(sorted_rows)
+    start = (total - n_pick) // 2
+    return sorted_rows[start:start + n_pick]
 
 
 def _quintile_spread(sorted_rows, n_pick, n_buckets=N_BUCKETS):
@@ -197,17 +235,18 @@ def main():
     print(f"SAT runtime pool: {n_sat} | Q1+2={len(pool_q12)} | "
           f"Q3+4={len(pool_q34)} | Q5={len(pool_q5)}")
 
-    s1 = _quintile_spread(pool_q12, STAGE1_N, N_BUCKETS)
-    s2 = _quintile_spread(pool_q34, STAGE2_N, N_BUCKETS)
-    s3 = _quintile_spread(pool_q5,  STAGE3_N, N_BUCKETS)
+    # Strategy per stage configurable via STAGE{N}_STRATEGY constants.
+    s1 = _pick(STAGE1_STRATEGY, pool_q12, STAGE1_N)
+    s2 = _pick(STAGE2_STRATEGY, pool_q34, STAGE2_N)
+    s3 = _pick(STAGE3_STRATEGY, pool_q5,  STAGE3_N)
 
-    # Stage4: SAT+UNSAT, broad runtime-spread, exclude SHAs already in stage1+2+3.
+    # Stage4: SAT+UNSAT, exclude SHAs already in stage1+2+3.
     used = {d["problem_sha256"] for d in (s1 + s2 + s3)}
     broad = sorted(
         (d for d in candidates if d["problem_sha256"] not in used),
         key=_runtime_key,
     )
-    s4 = _quintile_spread(broad, STAGE4_N, N_BUCKETS)
+    s4 = _pick(STAGE4_STRATEGY, broad, STAGE4_N)
 
     _write_sample(_STAGE1, s1, "stage1", "SAT runtime Q1+2 (fastest 40%)")
     _write_sample(_STAGE2, s2, "stage2", "SAT runtime Q3+4 (middle 40%)")
