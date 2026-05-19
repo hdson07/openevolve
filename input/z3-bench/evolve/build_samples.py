@@ -8,6 +8,11 @@ full aggregate, and re-selects stage1 / stage2 samples.
 Size metric: (num_hard_constraints, num_variables) tuple ascending — primary
 then tiebreak. Runtime (elapsed_ms) is NOT used for selection.
 
+Sample pool cap: baseline_ms <= MAX_BASELINE_MS (5 min). Excludes monster
+problems where even baseline times out under reasonable per-iteration
+budgets. problems.jsonl still contains the full set; only sample selection
+applies the cap.
+
 Stage1 (5):  SAT-only, quintile-spread by size (5 buckets, 1 per bucket).
 Stage2 (50): SAT + UNSAT, quintile-spread by size (5 buckets, 10 per bucket
              rank-linspace within bucket).
@@ -29,6 +34,7 @@ _STAGE2 = _HERE / "shared" / "stage2_sample.json"
 STAGE1_N = 5
 STAGE2_N = 50
 N_BUCKETS = 5
+MAX_BASELINE_MS = 300_000  # 5 min cap — exclude monster problems from sample pool
 
 
 def _scan_raw():
@@ -117,11 +123,19 @@ def main():
             f.write(json.dumps(d) + "\n")
     print(f"wrote {_PROBLEMS.relative_to(_BENCH.parent)} ({len(rows)} entries)")
 
+    candidates = [
+        d for d in rows
+        if (d.get("z3_status") or {}).get("elapsed_ms", 0) <= MAX_BASELINE_MS
+    ]
+    skipped = len(rows) - len(candidates)
+    print(f"sample pool: {len(candidates)} (skipped {skipped} with "
+          f"baseline_ms > {MAX_BASELINE_MS}ms)")
+
     sat = sorted(
-        (d for d in rows if (d.get("z3_status") or {}).get("result") == "Sat"),
+        (d for d in candidates if (d.get("z3_status") or {}).get("result") == "Sat"),
         key=_size_key,
     )
-    all_sorted = sorted(rows, key=_size_key)
+    all_sorted = sorted(candidates, key=_size_key)
 
     s1 = _quintile_spread(sat, STAGE1_N, N_BUCKETS)
     s2 = _quintile_spread(all_sorted, STAGE2_N, N_BUCKETS)

@@ -347,6 +347,24 @@ else
     echo -e "${YELLOW}Running in interactive mode...${NC}"
 fi
 
+# Build container startup command: auto-run claude-init then drop to shell
+# (or `tail -f /dev/null` in detached mode). Disable via AUTO_INSTALL_CLAUDE=0.
+# The init script lives at ./scripts/docker-init-claude.sh relative to the
+# container's working directory (SCRIPT_DIR in rootless mode, /app in root).
+INIT_SCRIPT_REL="./scripts/docker-init-claude.sh"
+if [ "$DETACHED_MODE" = true ]; then
+    CONTAINER_CMD=(
+        "bash" "-lc"
+        "if [ -x $INIT_SCRIPT_REL ]; then $INIT_SCRIPT_REL || true; fi; tail -f /dev/null"
+    )
+else
+    CONTAINER_CMD=(
+        "bash" "-lc"
+        "if [ -x $INIT_SCRIPT_REL ]; then $INIT_SCRIPT_REL || true; fi; exec bash"
+    )
+fi
+DOCKER_RUN_OPTS+=("-e" "AUTO_INSTALL_CLAUDE=${AUTO_INSTALL_CLAUDE:-1}")
+
 echo ""
 echo -e "${BLUE}Run Configuration:${NC}"
 echo -e "  Environment: $ENV_TYPE"
@@ -375,7 +393,7 @@ fi
 echo ""
 
 # Run Docker container
-if docker run "${DOCKER_RUN_OPTS[@]}" "$LOCAL_IMAGE"; then
+if docker run "${DOCKER_RUN_OPTS[@]}" "$LOCAL_IMAGE" "${CONTAINER_CMD[@]}"; then
     echo ""
     if [ "$DETACHED_MODE" = true ]; then
         echo -e "${GREEN}================================================${NC}"

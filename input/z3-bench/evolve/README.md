@@ -111,78 +111,86 @@ evaluator는 phase를 모름 — `get_params()` 결과만 받음. `extract_best.
 
 ## 4. 실행 절차 (Docker)
 
-### Host에서
+### 4.1 백엔드 선택
+
+| 항목 | OpenAI 호환 (기본) | Claude Code |
+|---|---|---|
+| 인증 | env var `OPENAI_API_KEY` (Gemini/OpenAI/local 등) | env var `CLAUDE_CODE_OAUTH_TOKEN` (host에서 `claude setup-token`) |
+| config.yaml model | `provider` 없음 또는 `openai` | `provider: claude_code` |
+| Config 예시 | `configs/default_config.yaml` | `configs/claude_code_example.yaml` |
+| Rate limit | 키 발급사 정책 | Pro/Max 5h window — 빠르게 막힘 |
+| 재현성 | `temperature`/`seed` 적용 | SDK 미지원, 약함 |
+| Docker 자동 셋업 | skip 권장 (`AUTO_INSTALL_CLAUDE=0`) | docker-init-claude.sh가 자동 실행 |
+
+### 4.2 Quickstart — Claude Code 백엔드
 
 ```bash
-export OPENAI_API_KEY="..."           # config.yaml의 api_base에 맞는 키
-                                      # (현재 gemini-2.5-flash → Google AI Studio key)
-./docker-run.sh dev -s z3evo          # interactive shell
+# === Host에서 (1회만) ===
+claude setup-token                          # 출력 토큰 복사 (Keychain 우회용 long-lived OAuth)
+export CLAUDE_CODE_OAUTH_TOKEN="sk-..."     # ~/.zshrc 등 영구화 권장
+
+./docker-run.sh dev -s z3evo                # 진입 — 첫 실행: claude CLI + SDK 자동 설치 (수 분)
+                                            # 두 번째부터: 즉시 셸 (영속 mount로 skip)
 ```
 
-`OPENAI_API_KEY`라는 이름은 OpenEvolve가 OpenAI 호환 SDK를 쓰기 때문. 실제 라우팅은 `config.yaml`의 `api_base`가 결정.
-
-### Claude Code 백엔드 사용 시
-
-`config.yaml`에서 `provider: claude_code`로 모델을 정의하면 (`configs/claude_code_example.yaml` 참고) API 키 대신 Claude Code 구독 인증을 쓸 수 있다. Docker 안에서 쓰려면:
-
-1. **Host에서 (1회만)**: long-lived OAuth 토큰 생성
-   ```bash
-   claude setup-token                # 출력된 토큰 복사
-   export CLAUDE_CODE_OAUTH_TOKEN="sk-..."
-   ```
-   macOS는 OAuth credential을 Keychain에 저장하므로 `~/.claude/` 마운트만으로는 인증 안 됨. 토큰 방식이 필수.
-
-2. **docker-run.sh 실행**: 위 env var가 export 되어 있으면 자동 전달 + `~/.claude/` 마운트 (settings/sessions 공유).
-   ```bash
-   ./docker-run.sh dev -s z3evo
-   ```
-
-3. **Container 안 (1회만)**: `claude` CLI 설치. axion 이미지에는 Node.js/npm 없음 → Anthropic 공식 standalone installer 사용 (Node 번들, 시스템 의존성 없음).
-   ```bash
-   curl -fsSL https://claude.ai/install.sh | bash
-   # 설치 위치: ~/.local/bin/claude
-   export PATH="$HOME/.local/bin:$PATH"   # ~/.bashrc에 영구 추가 권장
-   claude --version                       # sanity check
-   pip install -e ".[claude-code]"        # claude-agent-sdk
-   ```
-   SDK 탐색 순서: `~/.npm-global/bin/claude` → `/usr/local/bin/claude` → `~/.local/bin/claude` → `~/.claude/local/claude` → PATH. 위 경로 그대로 작동.
-
-   **설치 영속화**: 컨테이너는 `--rm`이라 종료 시 사라지지만 docker-run.sh가 `~/.axion-docker-persist/claude-local/`을 `/root/.local`로 마운트 → 한 번 설치하면 다음 컨테이너에서도 그대로 사용 가능.
-
-   **host 차이**:
-   - Linux host: docker-run.sh가 host `claude` 바이너리도 자동 마운트 (`/usr/local/bin/claude` ro) → installer 생략 가능.
-   - Mac host: cross-OS 불가 → 위 installer 필수.
-
-   **HOME 분리**: `~/.claude/`가 host에서 마운트되므로 host config 공유됨. 충돌 우려 시 컨테이너 안에서 `CLAUDE_CONFIG_DIR` 등 별도 path 지정.
-
-4. **체크**: 인증 작동 여부
-   ```bash
-   python -c "from openevolve.llm.claude_code import ClaudeCodeLLM; print('ok')"
-   ```
-
-**주의**: Claude Pro/Max 구독은 5시간 윈도우 rate limit 있음. 큰 evolution run은 빠르게 막힘. 작은 iteration으로 검증 먼저.
-
-### Container 안
-
 ```bash
-cd $SCRIPT_DIR    # rootless: 호스트 경로 그대로 / root: /app
+# === Container 안 (1회만) ===
+pip install -e ".[dev]"                     # OpenEvolve 본체
+apt-get install -y z3                       # 또는: pip install z3-solver
 
-# 1회 셋업
-pip install -e ".[dev]"
-apt-get install -y z3              # 또는: pip install z3-solver (CLI 동반)
-export OPENAI_API_KEY="..."        # 셸 안에서도 export 필요
+python -c "from openevolve.llm.claude_code import ClaudeCodeLLM; print('ok')"  # sanity check
 
-# (이미 생성됨, 재생성 원할 때만)
+# 데이터 sample (이미 생성됨; 재생성 원할 때만)
 python input/z3-bench/evolve/build_samples.py
 
-# 순차 실행 — 각 phase 종료 시 extract_best.py 자동 호출
+# Phase 순차 실행 — 각 phase 종료 시 extract_best.py 자동 호출
 ./input/z3-bench/evolve/run_phase.sh 1
 ./input/z3-bench/evolve/run_phase.sh 2
 ./input/z3-bench/evolve/run_phase.sh 3
 ./input/z3-bench/evolve/run_phase.sh 4
 ```
 
-### 체크포인트 재개
+### 4.3 Quickstart — OpenAI 호환 백엔드
+
+```bash
+# === Host에서 ===
+export OPENAI_API_KEY="..."                 # config.yaml의 api_base에 맞는 키
+AUTO_INSTALL_CLAUDE=0 ./docker-run.sh dev -s z3evo   # claude 셋업 skip
+
+# === Container 안 ===
+pip install -e ".[dev]"
+apt-get install -y z3
+export OPENAI_API_KEY="..."                 # 셸 안에서도 필요 (-e로 전달됨)
+./input/z3-bench/evolve/run_phase.sh 1
+```
+
+`OPENAI_API_KEY`라는 이름은 OpenEvolve가 OpenAI 호환 SDK를 쓰기 때문. 실제 라우팅은 `config.yaml`의 `api_base`가 결정 (Gemini, OpenAI, vLLM 등).
+
+### 4.4 docker-run.sh의 Claude Code 셋업 동작
+
+docker-run.sh가 [scripts/docker-init-claude.sh](../../../scripts/docker-init-claude.sh)를 컨테이너 startup 명령으로 실행. **멱등** (이미 설치돼 있으면 skip).
+
+| 단계 | 동작 | Skip 조건 |
+|---|---|---|
+| 1 | `~/.local/bin`을 PATH 추가 + `~/.bashrc` 영구화 | grep로 중복 차단 |
+| 2 | `claude` CLI 설치 (`curl -fsSL https://claude.ai/install.sh \| bash`) | `command -v claude` 성공 |
+| 3 | `pip install -e ".[claude-code]"` (= claude-agent-sdk) | `import claude_agent_sdk` 성공 |
+| 4 | Auth env var 체크 → 없으면 경고 | — |
+
+**영속화**: `--rm` 컨테이너지만 `~/.axion-docker-persist/claude-local/` → `/root/.local` 마운트로 설치 결과 호스트에 남음. 다음 컨테이너 즉시 사용.
+
+**자동 셋업 끄기**: `AUTO_INSTALL_CLAUDE=0 ./docker-run.sh ...`
+
+**Host OS별 차이**:
+- Linux host: host의 `claude` 바이너리도 read-only 자동 마운트 (`/usr/local/bin/claude`) → init script가 installer skip.
+- Mac host: cross-OS 불가 → init script가 standalone installer 실행 (Node 번들 포함).
+
+**Mount 요약** (root mode 기준):
+- `$HOME/.claude/` → `/root/.claude` (settings/sessions/projects 공유)
+- `~/.axion-docker-persist/claude-local/` → `/root/.local` (claude 바이너리 영속)
+- env forward: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`
+
+### 4.5 체크포인트 재개
 
 OpenEvolve가 `phase{N}_*/openevolve_output/checkpoints/checkpoint_K/`에 자동 저장. 재개:
 
@@ -196,7 +204,7 @@ python /app/openevolve-run.py \
     --iterations 100
 ```
 
-### Detached 장시간 실행
+### 4.6 Detached 장시간 실행
 
 ```bash
 ./docker-run.sh dev -s z3evo -d
@@ -204,6 +212,19 @@ docker exec -it axion-cell-container-dev-$USER-z3evo bash
 nohup ./input/z3-bench/evolve/run_phase.sh 1 \
     &> /app/logs/phase1.log &
 ```
+
+Detached mode에서도 init script가 background로 한 번 실행됨. `docker logs $CONTAINER_NAME`로 init 출력 확인.
+
+### 4.7 트러블슈팅
+
+| 증상 | 원인 / 해결 |
+|---|---|
+| 진입 시 `[init-claude] no CLAUDE_CODE_OAUTH_TOKEN ...` 경고 | host에서 `claude setup-token` → token export → 재실행 |
+| `claude --version` 안 됨 | `source ~/.bashrc` 또는 `export PATH="$HOME/.local/bin:$PATH"` |
+| init이 매번 재설치 | `~/.axion-docker-persist/claude-local/` 마운트 누락 (rootless면 `$HOME` bind에 포함되어 있어야 함). `ls ~/.local/bin/claude` 확인 |
+| `pip install` 실패 | cwd 확인 (`pyproject.toml` 있는지) — rootless면 `cd $SCRIPT_DIR` 먼저 |
+| Rate limit | Pro/Max 5h window 소진. `OPENEVOLVE_MAX_PROBLEMS` 축소 또는 OpenAI 호환 백엔드 병행 |
+| Mac에서 host claude 마운트 시도 | Mac 바이너리는 Linux 컨테이너에서 안 돎 → docker-run.sh가 자동 skip하고 installer로 fallback |
 
 ## 5. 환경 변수
 
