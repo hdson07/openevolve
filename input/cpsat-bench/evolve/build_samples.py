@@ -12,9 +12,12 @@ problems.jsonl is the full aggregate; sample selection applies a runtime cap
 boundaries don't get distorted by long-tail monsters.
 
 Stages (decisive = OPTIMAL or FEASIBLE; this dataset is all OPTIMAL):
-  stage1 (5)  center pick from runtime Q1+Q2 (fastest 40%)
-  stage2 (5)  center pick from runtime Q3+Q4 (middle 40%)
-  stage3 (5)  center pick from runtime Q5    (slowest 20%)
+  Runtime is clustered into N_BUCKETS via 1D k-means (Lloyd's). Clusters
+  are ordered by ascending centroid (c1=fastest, c5=slowest), then merged:
+
+  stage1 (5)  center pick from clusters c1+c2 (fast group)
+  stage2 (5)  center pick from clusters c3+c4 (mid group)
+  stage3 (5)  center pick from cluster  c5    (slow group)
   stage4 (20) quintile-spread broad sample, dedup vs stage1-3
 """
 import json
@@ -108,6 +111,54 @@ def _center_pick(sorted_rows, n_pick):
     return sorted_rows[start:start + n_pick]
 
 
+def _cluster_runtime(sorted_rows, k, max_iter=100):
+    """1D Lloyd's k-means on runtime. Input must be runtime-sorted ascending.
+    Returns list of k buckets (lists of rows), ordered by ascending centroid."""
+    n = len(sorted_rows)
+    if k <= 0:
+        return []
+    if n == 0:
+        return [[] for _ in range(k)]
+    if n <= k:
+        buckets = [[r] for r in sorted_rows]
+        buckets += [[] for _ in range(k - n)]
+        return buckets
+
+    values = [_runtime_key(d) for d in sorted_rows]
+    # init centroids at k-quantile midpoints over the sorted values.
+    centroids = [values[((2 * i + 1) * n) // (2 * k)] for i in range(k)]
+    labels = [0] * n
+
+    for _ in range(max_iter):
+        changed = False
+        for i, v in enumerate(values):
+            best, best_d = 0, abs(v - centroids[0])
+            for c in range(1, k):
+                d = abs(v - centroids[c])
+                if d < best_d:
+                    best_d, best = d, c
+            if labels[i] != best:
+                labels[i] = best
+                changed = True
+        if not changed:
+            break
+        sums = [0.0] * k
+        counts = [0] * k
+        for i, v in enumerate(values):
+            sums[labels[i]] += v
+            counts[labels[i]] += 1
+        for c in range(k):
+            if counts[c] > 0:
+                centroids[c] = sums[c] / counts[c]
+
+    order = sorted(range(k), key=lambda c: centroids[c])
+    rank = {old: new for new, old in enumerate(order)}
+    buckets = [[] for _ in range(k)]
+    for i, lbl in enumerate(labels):
+        buckets[rank[lbl]].append(sorted_rows[i])
+    return buckets
+
+
 def _quintile_spread(sorted_rows, n_pick, n_buckets=N_BUCKETS):
     total = len(sorted_rows)
     if total == 0 or n_pick <= 0:
@@ -186,18 +237,25 @@ def main():
     )
     n_decided = len(decided_by_rt)
 
-    def q_idx(i):
-        return (i * n_decided) // 5
+    clusters = _cluster_runtime(decided_by_rt, N_BUCKETS)
+    pool_c12 = clusters[0] + clusters[1]
+    pool_c34 = clusters[2] + clusters[3]
+    pool_c5 = clusters[4]
 
-    pool_q12 = decided_by_rt[q_idx(0):q_idx(2)]
-    pool_q34 = decided_by_rt[q_idx(2):q_idx(4)]
-    pool_q5 = decided_by_rt[q_idx(4):q_idx(5)]
-    print(f"decisive-result runtime pool: {n_decided} | Q1+2={len(pool_q12)} | "
-          f"Q3+4={len(pool_q34)} | Q5={len(pool_q5)}")
+    def _bucket_range(b):
+        if not b:
+            return "empty"
+        return f"{int(_runtime_key(b[0]))}-{int(_runtime_key(b[-1]))}ms"
 
-    s1 = _pick(STAGE1_STRATEGY, pool_q12, STAGE1_N)
-    s2 = _pick(STAGE2_STRATEGY, pool_q34, STAGE2_N)
-    s3 = _pick(STAGE3_STRATEGY, pool_q5, STAGE3_N)
+    print(f"decisive-result runtime pool: {n_decided} | clusters: " +
+          " | ".join(f"c{i+1}({len(b)},{_bucket_range(b)})"
+                     for i, b in enumerate(clusters)))
+    print(f"stage pools: c1+2={len(pool_c12)} | c3+4={len(pool_c34)} | "
+          f"c5={len(pool_c5)}")
+
+    s1 = _pick(STAGE1_STRATEGY, pool_c12, STAGE1_N)
+    s2 = _pick(STAGE2_STRATEGY, pool_c34, STAGE2_N)
+    s3 = _pick(STAGE3_STRATEGY, pool_c5, STAGE3_N)
 
     # Stage4: broad spread across full decisive pool, dedup vs stage1-3.
     used = {_id_key(d) for d in (s1 + s2 + s3)}
@@ -207,9 +265,9 @@ def main():
     )
     s4 = _pick(STAGE4_STRATEGY, broad, STAGE4_N)
 
-    _write_sample(_STAGE1, s1, "stage1", "decisive Q1+2 (fastest 40%)")
-    _write_sample(_STAGE2, s2, "stage2", "decisive Q3+4 (middle 40%)")
-    _write_sample(_STAGE3, s3, "stage3", "decisive Q5 (slowest 20%)")
+    _write_sample(_STAGE1, s1, "stage1", "decisive runtime clusters c1+c2 (fast group)")
+    _write_sample(_STAGE2, s2, "stage2", "decisive runtime clusters c3+c4 (mid group)")
+    _write_sample(_STAGE3, s3, "stage3", "decisive runtime cluster c5 (slow group)")
     _write_sample(_STAGE4, s4, "stage4", "broad runtime spread, dedup vs stage1-3")
 
     for label, picks in (("stage1", s1), ("stage2", s2),

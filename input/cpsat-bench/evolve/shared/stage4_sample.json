@@ -15,12 +15,12 @@
     "cf629228e69ab5f293c8c30459175cccac150e85ec84539bfd8d5dc27540cf1a",
     "674b484eb726690bc9d4878cb217bc6b22f30eac4f8d512be6e2713a303545dd",
     "4e4bc1ad622d2addafb58df0886f20fabf9c872e18cba83057410255a6e2f356",
-    "321b859ee1b2e3f9874968cf86a89765dcc94f1daa4f4081f8ad231b50911dd7",
+    "ed8349c414d687ac9dd6fc5f0f2406149f5e340dbddbb010a78b646aa1dff047",
     "c6a6b2aab48ad0047d3e14c25d630fb1e22e3844608af935b5e481c1965a8010",
     "12e68b0b5089d173f44977d0bc3a9a85c4639b3691b74fce9d76d473e3231d38",
     "62c6e2f566388ddc13097f1369c9ad4569c1b4f54f888066e8ab2bfe96d3a0b4",
     "14ea5ccece18b8bffb5947b963c7d0f9e5a2f1c56d1ccd70e1493be39380ba78",
-    "bef168aea12ee9d5a0b12880cb3c69ebc80ff968b9f2500a907c5f3f16f0d369",
+    "90e16615aa9873fcba0b9ffeaec5584d26877834691f2b3011096e29281d26ec",
     "a49d307cfcf3ca9dff031a54cca31086a1882b7c0e65c1da60de651a8c9a79b8"
   ],
   "summary": [
@@ -90,9 +90,9 @@
       "baseline_ms": 3107.88
     },
     {
-      "sha": "321b859ee1b2",
+      "sha": "ed8349c414d6",
       "baseline_result": "OPTIMAL",
-      "baseline_ms": 3472.19
+      "baseline_ms": 3318.12
     },
     {
       "sha": "c6a6b2aab48a",
@@ -115,9 +115,9 @@
       "baseline_ms": 4358.96
     },
     {
-      "sha": "bef168aea12e",
+      "sha": "90e16615aa98",
       "baseline_result": "OPTIMAL",
-      "baseline_ms": 7530.89
+      "baseline_ms": 5772.7
     },
     {
       "sha": "a49d307cfcf3",
