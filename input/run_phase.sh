@@ -162,10 +162,82 @@ if [ "$EXTRACT_ONLY" != "1" ]; then
     fi
 
     if [ -f "$ROOT/$REBASELINE_SCRIPT" ]; then
-        if [ "${SKIP_REBASELINE:-0}" = "1" ] && [ -f "$ROOT/shared/local_baseline.json" ]; then
+        # Bench-specific: if phase initial_program.py files declare PHASE_LOCKED
+        # with num_search_workers, the rebaseline script captures one baseline
+        # per unique W. SKIP_REBASELINE=1 only reuses an existing file when its
+        # schema covers every required W; legacy/incomplete files force a
+        # fresh rebaseline.
+        rebaseline_needed=0
+        if [ ! -f "$ROOT/shared/local_baseline.json" ]; then
+            rebaseline_needed=1
+            reason="missing local_baseline.json"
+        else
+            # Determine required worker counts from phase modules. Returns
+            # space-separated ints (e.g. "1 8") or empty if none declared.
+            REQ_WORKERS="$(
+                python - "$ROOT" <<'PY'
+import importlib.util
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1])
+workers = set()
+for prog in sorted(root.glob("phase*_*/initial_program.py")):
+    try:
+        spec = importlib.util.spec_from_file_location(prog.parent.name, prog)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception:
+        continue
+    pl = getattr(mod, "PHASE_LOCKED", None)
+    if isinstance(pl, dict) and "num_search_workers" in pl:
+        try:
+            workers.add(int(pl["num_search_workers"]))
+        except (TypeError, ValueError):
+            pass
+print(" ".join(str(w) for w in sorted(workers)))
+PY
+            )"
+            if [ -n "$REQ_WORKERS" ]; then
+                # Check that local_baseline.json's by_workers covers each W.
+                MISSING="$(
+                    python - "$ROOT/shared/local_baseline.json" "$REQ_WORKERS" <<'PY'
+import json
+import sys
+path, req = sys.argv[1], sys.argv[2].split()
+try:
+    data = json.load(open(path))
+except Exception:
+    print("unreadable")
+    sys.exit(0)
+if not isinstance(data, dict) or not data:
+    print("empty")
+    sys.exit(0)
+missing = []
+for w in req:
+    covered = False
+    for v in data.values():
+        if isinstance(v, dict) and isinstance(v.get("by_workers"), dict) and w in v["by_workers"]:
+            covered = True
+            break
+    if not covered:
+        missing.append(w)
+print(",".join(missing))
+PY
+                )"
+                if [ "$MISSING" = "unreadable" ] || [ "$MISSING" = "empty" ]; then
+                    rebaseline_needed=1
+                    reason="local_baseline.json $MISSING"
+                elif [ -n "$MISSING" ]; then
+                    rebaseline_needed=1
+                    reason="local_baseline.json missing worker counts: $MISSING (required: $REQ_WORKERS)"
+                fi
+            fi
+        fi
+
+        if [ "${SKIP_REBASELINE:-0}" = "1" ] && [ "$rebaseline_needed" = "0" ]; then
             echo "[run_phase] SKIP_REBASELINE=1 — reusing existing local_baseline.json"
-        elif [ "${SKIP_REBASELINE:-0}" = "1" ]; then
-            echo "[run_phase] SKIP_REBASELINE=1 but local_baseline.json missing — running $REBASELINE_SCRIPT..."
+        elif [ "${SKIP_REBASELINE:-0}" = "1" ] && [ "$rebaseline_needed" = "1" ]; then
+            echo "[run_phase] SKIP_REBASELINE=1 but $reason — forcing rebaseline."
             python "$ROOT/$REBASELINE_SCRIPT" || \
                 echo "warning: $REBASELINE_SCRIPT finished with mismatches; evaluator falls back to raw_ms for those."
         else

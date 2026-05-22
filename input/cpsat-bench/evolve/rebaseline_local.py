@@ -5,18 +5,46 @@ and write shared/local_baseline.json. Captures elapsed_ms, stats, AND
 objective_value — the last is critical for cost-mode scoring (variant cost
 needs a baseline_obj to ratio against).
 
+MULTI-WORKER BASELINES (2026-05 revision):
+  Each phase's initial_program.py pins num_search_workers via PHASE_LOCKED.
+  Comparing a workers=8 variant against a workers=1 baseline conflates
+  param-tuning gain with multi-thread parallelism gain. To keep speedup
+  honest, we capture one baseline PER unique worker count discovered across
+  the phase files, and store them under `by_workers` in the output.
+
+  Auto-discovery: walks sibling phase*_*/initial_program.py and unions every
+  PHASE_LOCKED["num_search_workers"]. Override with --workers 1,8 if needed.
+
+Output schema (shared/local_baseline.json):
+  {
+    "<sha>": {
+      "raw_result": "OPTIMAL",
+      "raw_elapsed_ms": 4321,
+      "by_workers": {
+        "1": {"elapsed_ms": ..., "result": ..., "stats": {...},
+              "objective": ..., "matches_raw": true},
+        "8": {"elapsed_ms": ..., "result": ..., "stats": {...},
+              "objective": ..., "matches_raw": true}
+      }
+    }
+  }
+
 Wall-clock varies by hardware / ortools version. raw-data timings were
 recorded elsewhere; evaluator overlays this local file so per-problem
 timeout = baseline_ms * 1.3 and speedup = local_baseline_ms / variant_ms
-are calibrated for this box.
+are calibrated for this box AND for the variant's worker count.
 
 Per-problem timeout = REBASELINE_TIMEOUT_S (1 hr safety floor). Never cut a
 baseline run short — a truncated baseline poisons every variant comparison.
 
-Concurrency = config parallel_solvers (env OPENEVOLVE_PARALLEL_SOLVERS override).
+Concurrency = floor(len(core_pool) / W) per worker count. W=1 fills the
+pool fully; W=8 typically runs sequentially on small hosts.
 """
+import argparse
+import importlib.util
 import json
 import pathlib
+import queue as _queue
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,7 +54,7 @@ sys.path.insert(0, str(_HERE / "shared"))
 
 from baseline_params import BASELINE  # noqa: E402
 from cpsat_runner import run_cpsat  # noqa: E402
-from runtime import parallel_solvers, core_range  # noqa: E402
+from runtime import parallel_solvers, core_range, alloc_core_blocks  # noqa: E402
 
 _BENCH_DIR = _HERE.parent
 _RAW_DIR = _BENCH_DIR / "raw-data"
@@ -78,7 +106,113 @@ def _load_target_shas():
     return ids
 
 
+def _discover_phase_workers():
+    """Union of PHASE_LOCKED['num_search_workers'] across sibling phase dirs.
+
+    Returns sorted list of unique worker counts (defaults to [1] if nothing
+    discovered, so the script still produces a usable baseline)."""
+    workers = set()
+    for prog in sorted(_HERE.glob("phase*_*/initial_program.py")):
+        try:
+            spec = importlib.util.spec_from_file_location(prog.parent.name, prog)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            print(f"WARN: failed to load {prog.relative_to(_HERE)}: {e}",
+                  file=sys.stderr)
+            continue
+        pl = getattr(mod, "PHASE_LOCKED", None)
+        if isinstance(pl, dict) and "num_search_workers" in pl:
+            try:
+                workers.add(int(pl["num_search_workers"]))
+            except (TypeError, ValueError):
+                pass
+    return sorted(workers) if workers else [1]
+
+
+def _parse_workers_arg(s):
+    out = []
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            w = int(tok)
+        except ValueError:
+            raise SystemExit(f"--workers: bad integer {tok!r}")
+        if w < 1:
+            raise SystemExit(f"--workers: {w} must be >= 1")
+        if w not in out:
+            out.append(w)
+    if not out:
+        raise SystemExit("--workers: empty list")
+    return sorted(out)
+
+
+def _measure_at_workers(tasks, w, cores):
+    """Run baseline for one worker count W across all tasks. Returns
+    list of (i, meta, res, core_block) tuples in submission order."""
+    blocks = alloc_core_blocks(cores, w)
+    if not blocks:
+        blocks = [list(cores)] if cores else [None]
+    n_parallel = min(len(blocks), len(tasks))
+    blocks = blocks[:n_parallel]
+
+    pool = _queue.Queue()
+    for b in blocks:
+        pool.put(b)
+
+    params = dict(BASELINE)
+    params["num_search_workers"] = w
+
+    def _fmt(b):
+        if isinstance(b, (list, tuple)):
+            return ",".join(str(x) for x in b)
+        return str(b) if b is not None else "-"
+
+    print(f"  workers={w}: parallel={n_parallel} blocks={[_fmt(b) for b in blocks]}",
+          flush=True)
+
+    def _solve(task):
+        i, meta, path = task
+        block = pool.get()
+        try:
+            res = run_cpsat(path, params, REBASELINE_TIMEOUT_S, cpu_core=block)
+        finally:
+            pool.put(block)
+        return i, meta, res, block
+
+    out = []
+    if n_parallel == 1:
+        for task in tasks:
+            out.append(_solve(task))
+    else:
+        with ThreadPoolExecutor(max_workers=n_parallel) as ex:
+            futures = [ex.submit(_solve, t) for t in tasks]
+            for fut in as_completed(futures):
+                out.append(fut.result())
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--workers",
+        type=str,
+        default=None,
+        help="comma-separated worker counts (e.g. '1,8'). Default: union of "
+             "PHASE_LOCKED['num_search_workers'] across sibling phase dirs.",
+    )
+    args = ap.parse_args()
+
+    if args.workers:
+        worker_counts = _parse_workers_arg(args.workers)
+        print(f"[rebaseline] worker counts (from --workers): {worker_counts}")
+    else:
+        worker_counts = _discover_phase_workers()
+        print(f"[rebaseline] worker counts (auto-discovered): {worker_counts}")
+
     shas = _load_target_shas()
     idx = _load_problem_index()
 
@@ -94,88 +228,75 @@ def main():
             return 2
         tasks.append((i, meta, path))
 
-    import queue as _queue
     cores = core_range()
     if cores is None:
         cores = list(range(1, parallel_solvers(default=1) + 1))
-    n_parallel = min(len(cores), len(tasks))
-    cores = cores[:n_parallel]
-    print(f"rebaselining union of stage{{1,2,3,4}}_sample.json: {len(tasks)} problems")
-    print(f"timeout per problem = {REBASELINE_TIMEOUT_S}s (never cut short), "
-          f"parallel={n_parallel} cores={cores}")
+
+    print(f"rebaselining union of stage{{1,2,3,4}}_sample.json: "
+          f"{len(tasks)} problems × {len(worker_counts)} worker counts")
+    print(f"  per-problem timeout = {REBASELINE_TIMEOUT_S}s (never cut short), "
+          f"core pool = {cores}")
     print()
 
-    _core_pool = _queue.Queue()
-    for _c in cores:
-        _core_pool.put(_c)
-
-    def _solve(task):
-        i, meta, path = task
-        core = _core_pool.get()
-        try:
-            res = run_cpsat(path, BASELINE, REBASELINE_TIMEOUT_S, cpu_core=core)
-        finally:
-            _core_pool.put(core)
-        return i, meta, res, core
+    # results[sha]["by_workers"][str(w)] = {...}
+    results = {}
+    for meta in (m for _, m, _ in tasks):
+        results[meta["sha"]] = {
+            "raw_result": meta["raw_result"],
+            "raw_elapsed_ms": meta["raw_ms"],
+            "by_workers": {},
+        }
 
     t_start = time.monotonic()
-    completed = []
-    if n_parallel == 1:
-        for task in tasks:
-            completed.append(_solve(task))
-    else:
-        with ThreadPoolExecutor(max_workers=n_parallel) as ex:
-            futures = [ex.submit(_solve, t) for t in tasks]
-            for fut in as_completed(futures):
-                completed.append(fut.result())
-    completed.sort(key=lambda x: x[0])
+    mismatch_total = 0
+    for w in worker_counts:
+        completed = _measure_at_workers(tasks, w, cores)
+        for i, meta, res, block in completed:
+            got_result = res.get("result", "Unknown")
+            got_ms = int(res.get("elapsed_ms", 0))
+            invalid = res.get("invalid_param")
+            ok = (got_result == meta["raw_result"]) and not invalid
+            if not ok:
+                mismatch_total += 1
 
-    out = {}
-    mismatch = 0
-    for i, meta, res, core in completed:
-        got_result = res.get("result", "Unknown")
-        got_ms = int(res.get("elapsed_ms", 0))
-        invalid = res.get("invalid_param")
-        ok = (got_result == meta["raw_result"]) and not invalid
-        if not ok:
-            mismatch += 1
+            if invalid:
+                flag = f"  INVALID_PARAM={invalid}"
+            elif ok:
+                flag = ""
+            else:
+                flag = "  MISMATCH"
+            ratio = got_ms / max(meta["raw_ms"], 1)
+            block_str = (",".join(str(x) for x in block)
+                         if isinstance(block, (list, tuple)) else str(block))
+            print(
+                f"  [W={w} {i+1:>2}/{len(tasks)}] {meta['sha'][:10]}  "
+                f"raw={meta['raw_result']:<10}/{int(meta['raw_ms']):>7}ms  "
+                f"local={got_result:<10}/{got_ms:>7}ms  ratio={ratio:.2f}x{flag}  "
+                f"cores={block_str}",
+                flush=True,
+            )
 
-        if invalid:
-            flag = f"  INVALID_PARAM={invalid}"
-        elif ok:
-            flag = ""
-        else:
-            flag = "  MISMATCH"
-        ratio = got_ms / max(meta["raw_ms"], 1)
-        print(
-            f"  [{i+1:>2}/{len(tasks)}] {meta['sha'][:10]}  "
-            f"raw={meta['raw_result']:<10}/{int(meta['raw_ms']):>7}ms  "
-            f"local={got_result:<10}/{got_ms:>7}ms  ratio={ratio:.2f}x{flag}  "
-            f"core={core}",
-            flush=True,
-        )
-
-        entry = {
-            "elapsed_ms": got_ms,
-            "result": got_result,
-            "matches_raw": ok,
-            "raw_elapsed_ms": meta["raw_ms"],
-            "stats": res.get("stats") or {},
-        }
-        if "objective" in res:
-            entry["objective"] = res["objective"]
-        out[meta["sha"]] = entry
+            entry = {
+                "elapsed_ms": got_ms,
+                "result": got_result,
+                "matches_raw": ok,
+                "stats": res.get("stats") or {},
+            }
+            if "objective" in res:
+                entry["objective"] = res["objective"]
+            results[meta["sha"]]["by_workers"][str(w)] = entry
 
     elapsed = time.monotonic() - t_start
-    _OUT.write_text(json.dumps(out, indent=2) + "\n")
+    _OUT.write_text(json.dumps(results, indent=2) + "\n")
     print()
     print(f"wrote {_OUT.relative_to(_BENCH_DIR.parent)} "
-          f"({len(out)} entries, {mismatch} mismatches)")
+          f"({len(results)} entries × {len(worker_counts)} W = "
+          f"{len(results) * len(worker_counts)} runs, {mismatch_total} mismatches)")
     print(f"total time: {elapsed:.1f}s")
-    if mismatch:
-        print(f"WARNING: {mismatch} problems had result mismatch — "
-              f"evaluator will keep raw_ms for those")
-    return 0 if mismatch == 0 else 1
+    if mismatch_total:
+        print(f"WARNING: {mismatch_total} (problem, W) pairs had result mismatch — "
+              f"evaluator will fall back to raw_ms for those.")
+    return 0 if mismatch_total == 0 else 1
 
 
 if __name__ == "__main__":

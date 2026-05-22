@@ -56,7 +56,34 @@ def _load_program(path):
     return module
 
 
-def _load_problems():
+def _pick_local_baseline(lo_entry, workers):
+    """Select the right local baseline entry for `workers`.
+
+    New schema: {"by_workers": {"1": {...}, "8": {...}}, ...}.
+    Legacy schema (flat keys: elapsed_ms/stats/objective/matches_raw) is
+    treated as workers=1 measurement.
+
+    Returns the inner dict (with matches_raw/elapsed_ms/stats/objective)
+    or None if no usable entry exists for that worker count.
+    """
+    if not isinstance(lo_entry, dict):
+        return None
+    bw = lo_entry.get("by_workers")
+    if isinstance(bw, dict) and bw:
+        key = str(int(workers))
+        if key in bw:
+            return bw[key]
+        # No exact match. Return None so caller falls back to raw_ms; we
+        # intentionally do NOT cross-substitute (e.g. W=8 → W=1) because the
+        # whole point of by_workers is to keep speedup ratios honest.
+        return None
+    # Legacy flat schema — treat as W=1 only.
+    if "elapsed_ms" in lo_entry and int(workers) == 1:
+        return lo_entry
+    return None
+
+
+def _load_problems(workers=1):
     local = {}
     if _LOCAL_BASELINE.exists():
         local = json.loads(_LOCAL_BASELINE.read_text())
@@ -69,7 +96,7 @@ def _load_problems():
             baseline_result = (d.get("cpsat_status") or {}).get("result")
             baseline_stats = d.get("cpsat_response_stats") or {}
             baseline_objective = (d.get("cpsat_status") or {}).get("objective_value")
-            lo = local.get(sha)
+            lo = _pick_local_baseline(local.get(sha), workers)
             if lo and lo.get("matches_raw"):
                 baseline_ms = lo["elapsed_ms"]
                 baseline_stats = lo.get("stats") or baseline_stats
@@ -351,25 +378,51 @@ def _evaluate(program_path, problems, stage_name):
     return EvaluationResult(metrics=metrics, artifacts=artifacts)
 
 
+def _peek_workers(program_path):
+    """Resolve num_search_workers for baseline lookup BEFORE running _evaluate.
+
+    Prefer PHASE_LOCKED (authoritative); fall back to get_params(). On any
+    failure, return 1 — _evaluate's own program-load handles the real error
+    reporting later."""
+    try:
+        program = _load_program(program_path)
+    except Exception:
+        return 1
+    pl = getattr(program, "PHASE_LOCKED", None)
+    if isinstance(pl, dict) and "num_search_workers" in pl:
+        try:
+            return int(pl["num_search_workers"])
+        except (TypeError, ValueError):
+            pass
+    try:
+        params = program.get_params()
+        return int(params.get("num_search_workers", 1) or 1)
+    except Exception:
+        return 1
+
+
 def evaluate_stage1(program_path):
-    return _evaluate(program_path, _filter_stage1(_load_problems()), "stage1")
+    w = _peek_workers(program_path)
+    return _evaluate(program_path, _filter_stage1(_load_problems(w)), "stage1")
 
 
 def evaluate_stage2(program_path):
-    return _evaluate(program_path, _filter_stage2(_load_problems()), "stage2")
+    w = _peek_workers(program_path)
+    return _evaluate(program_path, _filter_stage2(_load_problems(w)), "stage2")
 
 
 def evaluate_stage3(program_path):
     # openevolve cascade hardcodes 3 stages, so user-stage4 (broad runtime
     # sample) is chained inside stage3 via the runtime cascade_threshold gate.
-    problems3 = _filter_stage3(_load_problems())
+    w = _peek_workers(program_path)
+    problems3 = _filter_stage3(_load_problems(w))
     r3 = _evaluate(program_path, problems3, "stage3")
     if not isinstance(r3, EvaluationResult):
         return r3
     gate = cascade_threshold(2, default=1.03)
     if r3.metrics.get("combined_score", 0.0) < gate:
         return r3
-    problems4 = _filter_stage4(_load_problems())
+    problems4 = _filter_stage4(_load_problems(w))
     r4 = _evaluate(program_path, problems4, "stage4")
     if not isinstance(r4, EvaluationResult):
         return r4
@@ -380,7 +433,8 @@ def evaluate_stage3(program_path):
 
 def evaluate_stage4(program_path):
     # Standalone entry for manual / final-verify use. Not invoked by cascade.
-    problems = _filter_stage4(_load_problems())
+    w = _peek_workers(program_path)
+    problems = _filter_stage4(_load_problems(w))
     return _evaluate(program_path, problems, "stage4")
 
 
