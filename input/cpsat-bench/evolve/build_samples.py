@@ -47,16 +47,16 @@ _OUTLIERS_CSV_CANDIDATES = [
     _BENCH / "1" / "outliers_top.csv",
 ]
 
-STAGE1_N = 5
-STAGE2_N = 5
+STAGE1_N = 10
+STAGE2_N = 10
 STAGE3_N = 5
 STAGE4_N = 20
 N_BUCKETS = 5
 MAX_BASELINE_MS = 120_000   # cap — exclude > 2 min monsters from sample pool
-OUTLIER_IQR_K = 3.0
+OUTLIER_IQR_K = float('inf')
 
-STAGE1_STRATEGY = "center"
-STAGE2_STRATEGY = "center"
+STAGE1_STRATEGY = "spread"
+STAGE2_STRATEGY = "spread"
 STAGE3_STRATEGY = "outliers"   # was "center" — now picks outliers_top.csv
 STAGE4_STRATEGY = "spread"
 

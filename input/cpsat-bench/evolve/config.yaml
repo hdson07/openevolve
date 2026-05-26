@@ -8,11 +8,11 @@
 bench:
   phases:
     - dir: phase1_search
-      iters: 60
+      iters: 40
     - dir: phase2_presolve
-      iters: 100
+      iters: 40
     - dir: phase3_lp_cuts
-      iters: 80
+      iters: 40
     - dir: phase4_unified
       iters: 40
   unified_prepare_script: prepare_phase_unified.py
@@ -34,7 +34,7 @@ bench:
 #   - Env OPENEVOLVE_PARALLEL_SOLVERS overrides this value.
 parallel_solvers: 8
 
-max_iterations: 60
+max_iterations: 40
 checkpoint_interval: 10
 log_level: "INFO"
 random_seed: 42
