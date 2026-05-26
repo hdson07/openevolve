@@ -81,6 +81,23 @@ prompt:
     geomean punishes one regression heavily). All baselines are OPTIMAL, so a
     variant that bails to FEASIBLE with a worse objective_value scores below 1.0.
 
+    Optimization target: MINIMIZE RUNTIME (deterministic_time), aggressively.
+    Memory budget is loose — `max_memory_in_mb` default 10000 is far above
+    what this workload needs; do NOT trade runtime for memory. Concretely:
+      - Larger `max_num_cuts` is fine if it cuts conflicts / branches.
+      - Larger LP / cut storage (`cut_cleanup_target`, `clause_cleanup_target`,
+        `max_consecutive_inactive_count`) is fine if it stabilizes search.
+      - Larger `presolve_inclusion_work_limit`, `merge_at_most_one_work_limit`,
+        `merge_no_overlap_work_limit` is fine if presolve shaves real work.
+      - Larger `clause_cleanup_period` (keep more learned clauses longer) is
+        fine — clause memory is cheap.
+      - Larger `probing_num_combinations_limit`, deeper probing
+        (`cp_model_probing_level=2..3`) is fine when it pays off in search.
+      - LNS / shared-tree memory (solution_pool_size,
+        shared_tree_max_nodes_per_worker) — feel free to grow.
+    NEVER pick a "smaller / cheaper" value just because it sounds frugal.
+    The only signal is: does dtime go down without regressing solved_rate?
+
     Hard rules:
       - Do NOT modify locked keys: random_seed, num_search_workers, timeout_sec.
         (evaluator returns combined_score=0 + locked_violated artifact on violation.)
