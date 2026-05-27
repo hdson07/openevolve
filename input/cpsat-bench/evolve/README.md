@@ -33,7 +33,8 @@ input/cpsat-bench/
     │   ├── evaluator.py               # cascade stages
     │   ├── cpsat_runner.py            # subprocess solver invoker
     │   ├── _cpsat_solve_worker.py
-    │   ├── stage{1..4}_sample.json    # built by build_samples.py
+    │   ├── stage{1..4}_sample.json    # small profile (cascade staging)
+    │   ├── stage1_large_sample.json   # large profile (single hardest outlier)
     │   └── local_baseline.json        # built by rebaseline_local.py
     └── phase{1..4}_<name>/
         └── initial_program.py         # EVOLVE-BLOCK
@@ -104,15 +105,57 @@ python input/cpsat-bench/evolve/shared/baseline_params.py
 #    for cost-mode scoring — first run picks it up automatically too)
 python input/cpsat-bench/evolve/rebaseline_local.py
 
-# 4) run phases sequentially
-./input/cpsat-bench/evolve/run_phase.sh 1
-./input/cpsat-bench/evolve/run_phase.sh 2
-./input/cpsat-bench/evolve/run_phase.sh 3
-./input/cpsat-bench/evolve/run_phase.sh 4
+# 4) run phases sequentially (small profile = historical run)
+./input/run_phase.sh cpsat-bench 1
+./input/run_phase.sh cpsat-bench 2
+./input/run_phase.sh cpsat-bench 3
+./input/run_phase.sh cpsat-bench 4
+# or all phases at once:
+./input/run_phase.sh cpsat-bench
 ```
 
 After each non-final phase, `run_phase.sh` calls `extract_best.py` to write
 `shared/phaseN_best.json`, which the next phase's `initial_program.py` loads.
+
+## Profiles (`small` vs `large`)
+
+`run_phase.sh --profile <small|large>` switches between two independent
+tuning tracks:
+
+| | small (default) | large |
+|---|---|---|
+| sample files | `stage{1..4}_sample.json` (cascade staging) | `stage1_large_sample.json` (single sample) |
+| phase1/2 workers | 1 | 8 |
+| phase3/4 workers | 8 | 8 |
+| evaluation | cascade stage1 → 2 → 3 → 4 | single eval on all stages (cache-backed) |
+| problem set | clustered fast/mid + outliers + broad spread | top-`STAGE1_LARGE_N` residual outlier(s) from `Statistics/outliers_top.csv` |
+| output dir | `openevolve_output/` | `openevolve_output_large/` |
+
+Profile sets `OPENEVOLVE_PROFILE` env var that:
+
+- `evaluator.py` reads to pick sample file + dispatch every cascade stage
+  entry point (`evaluate_stage{1..4}`) to a single `_evaluate_large()` for
+  large profile (cache-backed so 3-stage cascade only runs 1 real eval).
+- `rebaseline_local.py` reads to rebaseline only the large sample set.
+- `phase{1,2}_*/initial_program.py` reads to override `PHASE_LOCKED`
+  `num_search_workers=8` (default 1).
+
+Adjust `STAGE1_LARGE_N` in `build_samples.py` to widen the outlier set.
+
+```bash
+# large profile (all phases W=8, single hardest outlier)
+./input/run_phase.sh cpsat-bench --profile large
+./input/run_phase.sh cpsat-bench 1 --profile large    # single phase
+```
+
+`local_baseline.json` is shared across profiles (keyed by worker count);
+running both profiles reuses each other's measurements where worker count
+matches.
+
+> Note: `extract_best.py` writes a single `phaseN_best.json` per phase
+> regardless of profile. Running both profiles back-to-back overwrites the
+> previous profile's best file. Rename/move it manually if you want to keep
+> both.
 
 ## Resume from checkpoint
 
@@ -137,6 +180,7 @@ python /app/openevolve-run.py \
 | `OPENEVOLVE_STATS_WEIGHT` | 0.333 | exponent on efficiency factor (0 disables) |
 | `OPENEVOLVE_COST_WEIGHT` | 1.0 | exponent on cost_ratio in cost-mode score (0 disables cost factor) |
 | `OPENEVOLVE_PYTHON_BIN` | `sys.executable` | python used by solver worker |
+| `OPENEVOLVE_PROFILE` | `small` | tuning track: `small` (cascade staging) or `large` (single outlier eval). Set automatically by `run_phase.sh --profile`. Drives sample file selection in `evaluator.py` / `rebaseline_local.py` and worker count override in phase1/2 `initial_program.py`. |
 | `SKIP_REBASELINE` | 0 | skip per-host baseline remeasurement (reuse existing local_baseline.json) |
 
 ## CPU pinning (Linux)

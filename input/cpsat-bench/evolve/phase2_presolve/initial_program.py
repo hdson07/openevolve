@@ -28,6 +28,7 @@ them. Phase 3 raises workers.
 Do NOT modify locked keys (random_seed, num_search_workers).
 """
 import json
+import os
 import pathlib
 import sys
 
@@ -37,9 +38,12 @@ sys.path.insert(0, str(_SHARED))
 from baseline_params import BASELINE  # noqa: E402
 
 
+# OPENEVOLVE_PROFILE=large → run this phase at W=8 (outlier tuning track).
+_LARGE_PROFILE = (os.environ.get("OPENEVOLVE_PROFILE", "small").strip().lower()
+                  == "large")
 PHASE_LOCKED = {
     "random_seed": 0,
-    "num_search_workers": 1,
+    "num_search_workers": 8 if _LARGE_PROFILE else 1,
 }
 
 

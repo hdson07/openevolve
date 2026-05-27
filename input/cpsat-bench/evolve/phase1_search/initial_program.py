@@ -28,6 +28,7 @@ raises the worker count to explore subsolver-mix effects.
 Do NOT modify locked keys (random_seed, num_search_workers).
 Invalid solver keys cause evaluator to return 0 and surface the offending key.
 """
+import os
 import pathlib
 import sys
 
@@ -37,9 +38,13 @@ sys.path.insert(0, str(_SHARED))
 from baseline_params import BASELINE  # noqa: E402
 
 
+# OPENEVOLVE_PROFILE=large → run this phase at W=8 (outlier tuning track).
+# Default (small) keeps the historical W=1 search-only sweep.
+_LARGE_PROFILE = (os.environ.get("OPENEVOLVE_PROFILE", "small").strip().lower()
+                  == "large")
 PHASE_LOCKED = {
     "random_seed": 0,
-    "num_search_workers": 1,
+    "num_search_workers": 8 if _LARGE_PROFILE else 1,
 }
 
 

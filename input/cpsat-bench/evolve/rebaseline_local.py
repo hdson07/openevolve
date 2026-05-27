@@ -50,6 +50,7 @@ pool fully; W=8 typically runs sequentially on small hosts.
 import argparse
 import importlib.util
 import json
+import os
 import pathlib
 import queue as _queue
 import sys
@@ -66,11 +67,26 @@ from runtime import parallel_solvers, core_range, alloc_core_blocks  # noqa: E40
 _BENCH_DIR = _HERE.parent
 _RAW_DIR = _BENCH_DIR / "raw-data"
 _PROBLEMS_JSONL = _BENCH_DIR / "problems.jsonl"
-_STAGE1_SAMPLE = _HERE / "shared" / "stage1_sample.json"
-_STAGE2_SAMPLE = _HERE / "shared" / "stage2_sample.json"
-_STAGE3_SAMPLE = _HERE / "shared" / "stage3_sample.json"
-_STAGE4_SAMPLE = _HERE / "shared" / "stage4_sample.json"
 _OUT = _HERE / "shared" / "local_baseline.json"
+
+
+def _profile():
+    return (os.environ.get("OPENEVOLVE_PROFILE") or "small").strip().lower()
+
+
+def _stage_sample(stage_num):
+    profile = _profile()
+    if profile != "small":
+        suffixed = _HERE / "shared" / f"stage{stage_num}_{profile}_sample.json"
+        if suffixed.exists():
+            return suffixed
+    return _HERE / "shared" / f"stage{stage_num}_sample.json"
+
+
+_STAGE1_SAMPLE = _stage_sample(1)
+_STAGE2_SAMPLE = _stage_sample(2)
+_STAGE3_SAMPLE = _stage_sample(3)
+_STAGE4_SAMPLE = _stage_sample(4)
 
 REBASELINE_TIMEOUT_S = 3600
 
@@ -92,7 +108,18 @@ def _load_problem_index():
 
 def _load_target_shas(include_stage3=True):
     """Union of stage sample SHAs (dedup, ordered by first appearance).
-    include_stage3=False → drop stage3 sample (used for W=1 task list)."""
+    include_stage3=False → drop stage3 sample (used for W=1 task list).
+
+    Large profile short-circuits to a single sample (stage1_large only) —
+    cascade staging is disabled in evaluator for that profile."""
+    if _profile() == "large":
+        large = _HERE / "shared" / "stage1_large_sample.json"
+        if not large.exists():
+            print(f"ERROR: {large} missing — run build_samples.py first",
+                  file=sys.stderr)
+            sys.exit(2)
+        return list(dict.fromkeys(json.loads(large.read_text())["sha256"]))
+
     if not _STAGE1_SAMPLE.exists():
         print(f"ERROR: {_STAGE1_SAMPLE} missing — run build_samples.py first",
               file=sys.stderr)

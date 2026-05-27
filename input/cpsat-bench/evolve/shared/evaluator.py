@@ -51,12 +51,30 @@ from openevolve.evaluation_result import EvaluationResult  # noqa: E402
 _BENCH_DIR = _HERE.parent.parent
 _RAW_DIR = _BENCH_DIR / "raw-data"
 _PROBLEMS_JSONL = _BENCH_DIR / "problems.jsonl"
-_STAGE1_SAMPLE = _HERE / "stage1_sample.json"
-_STAGE2_SAMPLE = _HERE / "stage2_sample.json"
-_STAGE3_SAMPLE = _HERE / "stage3_sample.json"
-_STAGE4_SAMPLE = _HERE / "stage4_sample.json"
 _OUTLIERS_JSON = _HERE / "outliers.json"
 _LOCAL_BASELINE = _HERE / "local_baseline.json"
+
+
+def _profile():
+    """Active sample profile (OPENEVOLVE_PROFILE env). 'small' (default) reads
+    legacy stage{N}_sample.json; 'large' reads stage{N}_large_sample.json,
+    falling back to legacy if the large file is missing."""
+    return (os.environ.get("OPENEVOLVE_PROFILE") or "small").strip().lower()
+
+
+def _stage_sample(stage_num):
+    profile = _profile()
+    if profile != "small":
+        suffixed = _HERE / f"stage{stage_num}_{profile}_sample.json"
+        if suffixed.exists():
+            return suffixed
+    return _HERE / f"stage{stage_num}_sample.json"
+
+
+_STAGE1_SAMPLE = _stage_sample(1)
+_STAGE2_SAMPLE = _stage_sample(2)
+_STAGE3_SAMPLE = _stage_sample(3)
+_STAGE4_SAMPLE = _stage_sample(4)
 
 
 def _load_outlier_shas():
@@ -509,17 +527,68 @@ def _peek_workers(program_path):
         return 1
 
 
+# Large profile: no cascade stages — every cascade call evaluates the same
+# outlier set once and caches. Cache lifetime = current evaluator process
+# (openevolve spawns a fresh worker per variant, so cache holds exactly one
+# entry per iteration). Keyed by program_path so a re-used path string doesn't
+# leak stale metrics across variants.
+_LARGE_RESULT_CACHE: dict = {}
+
+
+def _load_large_sample_shas():
+    path = _HERE / "stage1_large_sample.json"
+    if not path.exists():
+        return None
+    try:
+        return set(json.loads(path.read_text())["sha256"])
+    except (json.JSONDecodeError, KeyError, OSError):
+        return None
+
+
+def _evaluate_large(program_path):
+    """Single-stage evaluation for OPENEVOLVE_PROFILE=large. Runs all outliers
+    once, caches result, returns same EvaluationResult on subsequent cascade
+    calls (stage2/stage3 entry points) so the final variant score reflects the
+    real outlier score instead of a pass-through placeholder."""
+    key = str(program_path)
+    cached = _LARGE_RESULT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    keep = _load_large_sample_shas()
+    if keep is None:
+        result = _err_result(
+            {"error": "stage1_large_sample.json missing/invalid"},
+            {"suggestion": "Run build_samples.py to regenerate.",
+             "stage": "large"},
+        )
+        _LARGE_RESULT_CACHE[key] = result
+        return result
+
+    w = _peek_workers(program_path)
+    problems = [p for p in _load_problems(w) if p["sha"] in keep]
+    result = _evaluate(program_path, problems, "large")
+    _LARGE_RESULT_CACHE[key] = result
+    return result
+
+
 def evaluate_stage1(program_path):
+    if _profile() == "large":
+        return _evaluate_large(program_path)
     w = _peek_workers(program_path)
     return _evaluate(program_path, _filter_stage1(_load_problems(w)), "stage1")
 
 
 def evaluate_stage2(program_path):
+    if _profile() == "large":
+        return _evaluate_large(program_path)
     w = _peek_workers(program_path)
     return _evaluate(program_path, _filter_stage2(_load_problems(w)), "stage2")
 
 
 def evaluate_stage3(program_path):
+    if _profile() == "large":
+        return _evaluate_large(program_path)
     # openevolve cascade hardcodes 3 stages, so user-stage4 (broad runtime
     # sample) is chained inside stage3 via the runtime cascade_threshold gate.
     #
@@ -557,6 +626,8 @@ def evaluate_stage3(program_path):
 
 def evaluate_stage4(program_path):
     # Standalone entry for manual / final-verify use. Not invoked by cascade.
+    if _profile() == "large":
+        return _evaluate_large(program_path)
     w = _peek_workers(program_path)
     problems = _filter_stage4(_load_problems(w))
     return _evaluate(program_path, problems, "stage4")

@@ -6,13 +6,25 @@
 #
 # Usage:
 #   ./input/run_phase.sh <bench> [<phase>] [--pin N-M] [--extract-only]
-#                                          [--iterations <N>] [extra flags]
+#                                          [--iterations <N>] [--profile small|large]
+#                                          [extra flags]
 #
 #   <phase> omitted  → run ALL phases sequentially (1..N).
 #   <phase> numeric  → run that single phase.
 #
+#   --profile small  (default) historical run: phase1/2 W=1, phase3/4 W=8,
+#                    uses stage{1..4}_sample.json. Output: openevolve_output/.
+#   --profile large  outlier-only tuning track: phase1..4 all W=8, uses
+#                    stage{1..4}_large_sample.json (stage1=outliers, rest
+#                    empty → cascade pass-through). Output:
+#                    openevolve_output_large/. Sets OPENEVOLVE_PROFILE=large
+#                    so evaluator + phase initial_program.py pick the right
+#                    sample files and worker count.
+#
 # Examples:
-#   ./input/run_phase.sh cpsat-bench           # run all phases (1..4)
+#   ./input/run_phase.sh cpsat-bench                       # all phases, small profile
+#   ./input/run_phase.sh cpsat-bench --profile large       # all phases, large profile
+#   ./input/run_phase.sh cpsat-bench 1 --profile large     # single phase, large
 #   ./input/run_phase.sh cpsat-bench --pin 2-7 # all phases, pinned
 #   ./input/run_phase.sh cpsat-bench 1 --pin 2-7
 #   ./input/run_phase.sh z3-bench 4
@@ -89,6 +101,7 @@ PHASE_RANGE_STR="1..$N_PHASES"
 # Parse remaining flags
 EXTRACT_ONLY=0
 PIN_RANGE=""
+PROFILE="small"
 PASSTHROUGH=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -104,6 +117,14 @@ while [ $# -gt 0 ]; do
             PIN_RANGE="${1#--pin=}"
             shift
             ;;
+        --profile)
+            PROFILE="$2"
+            shift 2
+            ;;
+        --profile=*)
+            PROFILE="${1#--profile=}"
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -115,6 +136,24 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+
+case "$PROFILE" in
+    small|large) ;;
+    *)
+        echo "--profile must be 'small' or 'large' (got: $PROFILE)" >&2
+        exit 2
+        ;;
+esac
+
+export OPENEVOLVE_PROFILE="$PROFILE"
+echo "[run_phase] OPENEVOLVE_PROFILE=$PROFILE"
+
+# Profile-suffixed output dir so small/large runs don't collide.
+if [ "$PROFILE" = "small" ]; then
+    OUTPUT_DIR="openevolve_output"
+else
+    OUTPUT_DIR="openevolve_output_${PROFILE}"
+fi
 
 # Decide phase list
 if [ -z "$PHASE" ]; then
@@ -156,7 +195,14 @@ if [ "$EXTRACT_ONLY" != "1" ]; then
         exit 1
     fi
 
+    need_build=0
     if [ ! -f "$ROOT/shared/stage1_sample.json" ] || [ ! -f "$ROOT/shared/stage2_sample.json" ]; then
+        need_build=1
+    fi
+    if [ "$PROFILE" = "large" ] && [ ! -f "$ROOT/shared/stage1_large_sample.json" ]; then
+        need_build=1
+    fi
+    if [ "$need_build" = "1" ]; then
         echo "[run_phase] sample json missing — running $BUILD_SAMPLES_SCRIPT first..."
         python "$ROOT/$BUILD_SAMPLES_SCRIPT"
     fi
@@ -296,7 +342,7 @@ run_one_phase() {
     fi
 
     cd "$ROOT/$dir"
-    echo "[run_phase] === bench=$BENCH phase=$phase dir=$dir ${iter:+iter=$iter }cwd=$(pwd) ==="
+    echo "[run_phase] === bench=$BENCH phase=$phase dir=$dir profile=$PROFILE output=$OUTPUT_DIR ${iter:+iter=$iter }cwd=$(pwd) ==="
 
     local iter_flag=()
     if [ -n "$iter" ]; then
@@ -307,6 +353,7 @@ run_one_phase() {
         initial_program.py \
         "$ROOT/shared/evaluator.py" \
         --config "$ROOT/config.yaml" \
+        --output "$OUTPUT_DIR" \
         "${iter_flag[@]+"${iter_flag[@]}"}" \
         "$@"
 

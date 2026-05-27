@@ -42,6 +42,13 @@ _STAGE3 = _HERE / "shared" / "stage3_sample.json"
 _STAGE4 = _HERE / "shared" / "stage4_sample.json"
 _OUTLIERS_JSON = _HERE / "shared" / "outliers.json"
 
+# Large-profile sample (selected via OPENEVOLVE_PROFILE=large). Single file
+# only — large profile bypasses cascade staging entirely; evaluator dispatches
+# every stage entry point to a single outlier-set evaluation. File name keeps
+# the stage1_large prefix so legacy callers (and evaluator's path resolver)
+# continue to find it.
+_STAGE1_LARGE = _HERE / "shared" / "stage1_large_sample.json"
+
 # outliers_top.csv lives under cpsat-bench/Statistics/ (or its rename "1/").
 _OUTLIERS_CSV_CANDIDATES = [
     _BENCH / "Statistics" / "outliers_top.csv",
@@ -53,6 +60,10 @@ STAGE2_N = 10
 STAGE3_N = 5
 STAGE4_N = 20
 N_BUCKETS = 5
+# Large profile: single hardest outlier (top residual from outliers_top.csv).
+# Tune higher if want to evaluate against more outliers at the cost of
+# proportionally longer per-iteration eval time.
+STAGE1_LARGE_N = 1
 # Global cap for stage1/2/4 sample pool. Anything slower than 2 min skews
 # the quintile clustering.
 MAX_BASELINE_MS = 120_000
@@ -483,6 +494,42 @@ def main():
             print(f"  {_id_key(d)[:12]}  "
                   f"{str(_result_key(d)):<10}  "
                   f"{int(_runtime_key(d)):>7}ms")
+
+    # ---- large profile sample (OPENEVOLVE_PROFILE=large) ----
+    # Single sample file with STAGE1_LARGE_N top-residual outliers (default 1).
+    # evaluator dispatches every cascade stage entry point to one outlier-set
+    # evaluation, so no stage2/3/4 split is needed.
+    if csv_all:
+        eligible = [c for c in csv_all if c["sha"] in rows_by_sha]
+        # csv_all already sorted by descending residual in _load_outliers_top.
+        large_picks = eligible[:STAGE1_LARGE_N]
+        large_rows = [rows_by_sha[c["sha"]] for c in large_picks]
+    else:
+        large_picks = []
+        large_rows = []
+    _write_sample(
+        _STAGE1_LARGE, large_rows, "stage1_large",
+        f"top-{STAGE1_LARGE_N} residual outlier(s) from outliers_top.csv "
+        f"(W=8 tuning set)",
+    )
+
+    # Clean up stale empty stage{2,3,4}_large files from older builds — they
+    # would be picked up by evaluator's path resolver and produce stale empty
+    # pass-throughs, masking real outlier scores.
+    for stale in (
+        _HERE / "shared" / "stage2_large_sample.json",
+        _HERE / "shared" / "stage3_large_sample.json",
+        _HERE / "shared" / "stage4_large_sample.json",
+    ):
+        if stale.exists():
+            stale.unlink()
+            print(f"removed stale {stale.relative_to(_BENCH.parent)}")
+
+    print(f"\nstage1_large ({len(large_rows)} outliers):")
+    for d in large_rows:
+        print(f"  {_id_key(d)[:12]}  "
+              f"{str(_result_key(d)):<10}  "
+              f"{int(_runtime_key(d)):>7}ms")
 
 
 if __name__ == "__main__":
