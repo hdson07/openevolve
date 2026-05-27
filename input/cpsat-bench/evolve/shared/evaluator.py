@@ -261,6 +261,35 @@ def _evaluate(program_path, problems, stage_name):
     if "OPENEVOLVE_MAX_PROBLEMS" in os.environ:
         problems = problems[: int(os.environ["OPENEVOLVE_MAX_PROBLEMS"])]
 
+    # Empty stage sample → pass-through. Score is set well above any sane
+    # cascade_thresholds entry so downstream stages keep running. Use this to
+    # debug a single stage in isolation by emptying the samples for the others.
+    if not problems:
+        pass_through = {
+            "combined_score": 100.0,
+            "geomean_speedup": 100.0,
+            "geomean_wall_speedup": 100.0,
+            "solved_rate": 1.0,
+            "regressions": 0,
+            "solved": 0,
+            "comparable": 0,
+            "total": 0,
+            "uncomparable": 0,
+            "efficiency": 1.0,
+            "efficiency_pairs": 0,
+            "stats_weight": 0.0,
+            "dtime_used": 0,
+            "dtime_fallback": 0,
+            "stage": stage_name,
+        }
+        return EvaluationResult(
+            metrics=pass_through,
+            artifacts={
+                "stage": stage_name,
+                "summary": "empty sample — stage skipped (cascade pass-through, score=100)",
+            },
+        )
+
     for p in problems:
         input_path = _RAW_DIR / p["input_file"]
         if not input_path.exists():

@@ -163,6 +163,9 @@ def _parse_workers_arg(s):
 def _measure_at_workers(tasks, w, cores):
     """Run baseline for one worker count W across all tasks. Returns
     list of (i, meta, res, core_block) tuples in submission order."""
+    if not tasks:
+        print(f"  workers={w}: no tasks — skipping", flush=True)
+        return []
     blocks = alloc_core_blocks(cores, w)
     if not blocks:
         blocks = [list(cores)] if cores else [None]
