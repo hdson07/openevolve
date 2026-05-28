@@ -31,7 +31,7 @@
     <li><a href="#iteration">한 iteration의 생애</a></li>
     <li><a href="#llm">LLM이 어떻게 적용되나</a></li>
     <li><a href="#z3-result">Z3 파라미터 최적화 — 실제 결과</a></li>
-    <li><a href="#log-example">실전 예시: CP-SAT phase2 진화 로그 읽기</a></li>
+    <li><a href="#log-example">실전 예시: CP-SAT 3-Phase 진화 로그 읽기</a></li>
     <li><a href="#bench">repo 활용: z3-bench / cpsat-bench</a></li>
     <li><a href="#checklist">새 솔버에 적용하려면</a></li>
     <li><a href="#glossary">용어 미니 사전</a></li>
@@ -707,164 +707,142 @@ conflicts=1.3M decisions=2.1M propagations=8.9M
 
 <!-- 7. 실전 진화 로그 예시 -->
 <section id="log-example">
-  <h2>7. 실전 예시 — CP-SAT phase2 진화 로그 읽기</h2>
+  <h2>7. 실전 예시 — CP-SAT 3-Phase 진화 로그 읽기</h2>
   <p>
-    여기까지가 이론. 이제 실제 로그를 따라가며 LLM이 어떻게 CP-SAT 파라미터를 튜닝하는지 본다. 로그 출처: <code>input/cpsat-bench/evolve/phase2_presolve/openevolve_output/logs/openevolve_20260527_154008.log</code>. Phase2는 phase1의 best 결과를 물려받아 <strong>presolve/probing 표면</strong>을 미세 조정하는 단계.
+    여기까지가 이론. 이제 실제 로그를 따라가며 LLM이 어떻게 CP-SAT 파라미터를 튜닝하는지, 그리고 phase 체이닝이 <strong>이득과 regression을 동시에 전달</strong>하는 모습을 본다. 로그 출처: <code>input/cpsat-bench/evolve/phase{1,2,3}_*/openevolve_output/logs/</code>. 각 phase는 직전 phase의 best를 물려받아 다른 파라미터 표면을 튜닝한다 (phase1 search/subsolvers → phase2 presolve/probing → phase3 LP/cuts).
   </p>
 
-  <h3>7.1 실행 환경</h3>
+  <h3>7.1 공통 실행 환경 (3 phase 동일)</h3>
   <table>
     <thead><tr><th>항목</th><th>값</th></tr></thead>
     <tbody>
       <tr><td>LLM Ensemble</td><td><code>claude-sonnet-4-6</code> (weight 0.80) + <code>claude-haiku-4-5</code> (weight 0.20)</td></tr>
-      <tr><td>Random seed</td><td>42 (재현성 확보)</td></tr>
-      <tr><td>Island</td><td>3개</td></tr>
-      <tr><td>총 iteration</td><td>20</td></tr>
-      <tr><td>고정(LOCKED) 파라미터</td><td><code>random_seed=0</code>, <code>num_search_workers=1</code> — LLM이 못 건드림</td></tr>
-      <tr><td>샘플 문제</td><td>stage1=10개, stage2=10개, stage3=outlier (cascade 평가)</td></tr>
-      <tr><td>Phase 위치</td><td>phase1 best 상속 → presolve 표면 튜닝</td></tr>
+      <tr><td>Random seed / Island</td><td>42 (재현성) / 3개</td></tr>
+      <tr><td>phase당 iteration</td><td>40</td></tr>
+      <tr><td>고정(LOCKED) 파라미터</td><td><code>random_seed=0</code>, <code>num_search_workers</code>=1 (phase1/2) / 8 (phase3) — LLM이 못 건드림</td></tr>
+      <tr><td>Cascade 평가</td><td>stage1(10) → stage2(10) → [stage3 outlier, phase3+] → stage4(20)</td></tr>
+      <tr><td>Phase 체이닝</td><td>phaseN best → phase(N+1) <code>initial_program.py</code>로 상속</td></tr>
     </tbody>
   </table>
 
-  <h3>7.2 시작점 — 이미 높은 baseline (score 0.9976)</h3>
+  <h3>7.2 Phase 1 — search / subsolvers: 큰 도약 (0.71 → 1.46)</h3>
   <p>
-    Phase2의 초기 <code>initial_program.py</code>는 phase1에서 검증된 minimum 설정만 들고 있다. Phase1이 다양한 search 옵션을 시도한 뒤 살아남은 핵심 파라미터:
+    Phase1은 가장 큰 표면(search 전략 + subsolver 조합)을 단독으로 탐색한다. 초기 config는 탐색이 무거워 <em>deterministic_time은 느리지만</em> branch/conflict 수는 적다(efficiency 2.25).
   </p>
-  <pre><code>GLOBAL_OVERRIDES = {
-    "cp_model_probing_level": 1,
-}
+  <pre><code>initial: combined_score=0.7123  geomean_speedup=0.5436  efficiency=2.2518  (solved 10/10)
+winner : combined_score=1.4582  geomean_speedup=1.1786  efficiency=1.8948  (solved 20/20)
+         🌟 new best @ iter 1, 4, 31</code></pre>
 
-SIZE_BUCKETS = [
-    (50_000,         {}),
-    (150_000,        {}),
-    (float("inf"),   {}),
-]
-
-STAGE3_OVERRIDES = {}</code></pre>
-
-  <p>평가 결과:</p>
-  <pre><code>combined_score = 0.9976
-geomean_speedup = 1.0409          ← deterministic_time 4.1% 단축
-geomean_wall_speedup = 1.2351     ← wall time 23.5% 빠름
-solved_rate = 1.0 (10/10 OPTIMAL)
-efficiency = 0.8802               ← 일부 문제에서 conflicts 약간 증가 (88점)</code></pre>
-
-  <div class="callout">
-    <strong>Phase1과의 큰 차이.</strong> Phase1은 score=0에서 출발했지만 Phase2는 시작부터 0.9976. 즉 phase1이 잘 작동해 미세 조정만 남은 상태. <em>큰 도약 대신 점진적 개선이 목표</em>.
-  </div>
-
-  <h3>7.3 Iteration 1 — SIZE_BUCKETS와 STAGE3_OVERRIDES 채움 (score 1.0)</h3>
-  <p>
-    Iteration 1에서 ensemble이 <code>claude-haiku-4-5</code>를 샘플링. LLM thinking 로그를 한국어로 요약하면:
-  </p>
-
-  <div class="callout">
-    <strong>LLM 사고 요약 (번역):</strong>
-    <ol>
-      <li>"현재 score 0.9976 — 이미 매우 높음. 큰 점프 대신 점진적 개선이 필요하다."</li>
-      <li>"Phase2는 presolve/probing 튜닝 단계. <code>cp_model_probing_level=1</code>이 글로벌 기본인데, <em>작은 문제(&lt;50k)</em>는 SAT-유사 특성이라 probing을 더 높게 가져도 안전하다."</li>
-      <li>"<code>SIZE_BUCKETS</code>의 첫 버킷에 <code>cp_model_probing_level: 2</code> 추가. 중/대 버킷은 그대로 두어 LP-heavy 인스턴스 회귀 방지."</li>
-      <li>"Outlier(stage3 전용)에는 더 공격적으로 — <code>cp_model_probing_level: 3</code>, <code>symmetry_level: 3</code>, <code>probing_num_combinations_limit: 35000</code>. STAGE3_OVERRIDES는 outlier에만 적용되니 일반 stage1/2 성능 손해 없음."</li>
-    </ol>
-  </div>
-
-  <p>
-    LLM이 적용한 새 EVOLVE-BLOCK:
-  </p>
-
-  <pre><code>GLOBAL_OVERRIDES = {
-    "cp_model_probing_level": 1,    # 글로벌은 보수적으로 유지
-}
-
-SIZE_BUCKETS = [
-    (50000,  {"cp_model_probing_level": 2}),   # 작은 문제 — probing 올림
-    (150000, {}),                              # 중간 — 그대로
-    (inf,    {}),                              # 큰 문제 — 그대로 (LP-heavy 보호)
-]
-
-STAGE3_OVERRIDES = {
-    "cp_model_probing_level": 3,               # outlier 전용 — 강력
-    "symmetry_level": 3,
-    "probing_num_combinations_limit": 35000,
-}</code></pre>
-
-  <p>평가 결과:</p>
-  <pre><code>iter 1: combined_score = 1.0000  (0.9976 → 1.0000, +0.0024)
-        solved_rate = 1.0  (10/10 OPTIMAL)
-        geomean_speedup = 1.0000
-        geomean_wall_speedup = 1.1226
-        efficiency = 1.0000           ← efficiency 페널티 사라짐
-        🌟 New best solution found at iteration 1</code></pre>
+  <p>winner가 채택한 핵심 — feasibility 휴리스틱:</p>
+  <pre><code>GLOBAL_OVERRIDES = { "use_feasibility_pump": True }   # 작은/중간 문제 dtime 단축
+SIZE_BUCKETS[large] = { "use_feasibility_jump": True, "use_feasibility_pump": True }
+STAGE3_OVERRIDES = { "repair_hint": True, "hint_conflict_limit": 50 }</code></pre>
 
   <div class="callout ok">
-    <strong>주목할 점.</strong> wall_speedup은 1.2351 → 1.1226으로 살짝 하락. 하지만 <code>combined_score</code>는 <strong>증가</strong>. 이유는 efficiency 0.88 → 1.00. score 식이 wall만 보지 않고 efficiency까지 가중치를 두기 때문에, <em>"솔버가 더 적은 일을 해서 같은 결과를 얻은 변형"</em>이 더 높은 점수를 받는다.
+    <strong>결과.</strong> deterministic_time <strong>17.9% 단축</strong> (geomean_speedup 1.1786), stage4까지 통과해 20/20 OPTIMAL. 큰 탐색 공간이라 점수가 0.71 → 1.46으로 크게 도약. (LLM 생성 timeout 10회 — claude_code 3-retry 후 skip.)
+  </div>
+  <div class="callout danger">
+    <strong>복선.</strong> winner가 켠 <code>use_feasibility_jump/pump</code>가 phase2 <code>initial_program.py</code>로 상속되며 곧바로 문제를 일으킨다.
   </div>
 
-  <h3>7.4 Iteration 5~6 — 욕심내다 efficiency 페널티</h3>
+  <h3>7.3 Phase 2 시작 — 상속이 깨졌다 (score 0.0000)</h3>
   <p>
-    Iteration 5, 6에서 LLM이 더 공격적인 presolve 옵션을 시도. 결과는 의외:
+    Phase2(presolve/probing)는 phase1 winner를 상속한다. 그런데 초기 평가가 <strong>0점</strong>. phase1에서 켠 <code>use_feasibility_jump=True</code>가 <code>num_search_workers=1</code> 환경에서 사실상 유일 solver로 돌면서 한 문제에서 feasibility를 잃었다.
   </p>
-  <pre><code>iter 5: combined_score=0.7969  geomean_speedup=0.8460  efficiency=0.8356
-iter 6: combined_score=0.6964  geomean_speedup=0.7689  efficiency=0.7427</code></pre>
-  <p>
-    OPTIMAL은 다 맞췄지만 (<code>solved_rate=1.0</code>) score는 큰 폭으로 하락. 원인은 두 가지:
-  </p>
-  <ul>
-    <li><strong>geomean_speedup &lt; 1.0</strong> — variant가 baseline보다 deterministic_time을 <em>더 많이</em> 씀</li>
-    <li><strong>efficiency 하락</strong> — conflicts 5,221 → 7,817~8,670개로 증가. 솔버가 헤맴.</li>
-  </ul>
-
-  <div class="callout">
-    <strong>학습 포인트.</strong> 이미 score 1.0인 상태에서 추가 개선은 매우 어렵다. 어설픈 욕심이 오히려 후퇴. score 식 자체가 "더 빠르거나 더 효율적이면 보상, 양쪽 다 나쁘면 페널티" 구조라 stable한 변형이 valuable.
-  </div>
-
-  <h3>7.5 Iteration 7~13 — Regression 폭주와 같은 문제 반복</h3>
-  <p>
-    Iteration 7, 8, 10, 11, 12, 13 모두 같은 에러:
-  </p>
-  <pre><code>combined_score = 0.0000
-error = "result regression on 3e69d6f5b7: baseline=OPTIMAL got=UNKNOWN"</code></pre>
-  <p>
-    같은 문제(SHA <code>3e69d6f5b7</code>, num_constraints=28938)에서 반복적으로 OPTIMAL → UNKNOWN. LLM이 매번 다른 변형을 시도하는데 자꾸 이 한 문제가 무너진다. 이 문제는 phase1에서 무난히 풀던 문제 — phase2의 presolve 튜닝이 이 문제의 핵심 구조를 깬다는 의미.
-  </p>
+  <pre><code>initial c69923ed: combined_score=0.0000  solved_rate=0.0000
+artifact.result_mismatch = {
+    "sha": "b5e191a8...", "baseline_result": "OPTIMAL", "got_result": "UNKNOWN"
+}
+artifact.suggestion = "Variant lost feasibility on a problem baseline reached optimal.
+    Revert params that disable a needed subsolver or shorten search."</code></pre>
 
   <div class="callout danger">
-    <strong>Phase2의 어려움.</strong> Phase1과 달리 phase2의 가능한 변형 공간이 <em>이미 잘 작동하는 baseline</em>에 비해 좁다. 한 발만 잘못 디뎌도 OPTIMAL → UNKNOWN. LLM이 conservative 영역에서 surf해야 함.
+    <strong>체이닝의 양날.</strong> phase 체이닝은 이득뿐 아니라 regression도 전달한다. 단 하나의 OPTIMAL→UNKNOWN이 <code>solved_rate=0</code>을 만들고, score 식의 <code>solved_rate²</code> 항이 combined_score를 0으로 떨군다. 하지만 evaluator가 돌려준 <code>result_mismatch</code> + <code>suggestion</code> artifact가 다음 iteration들의 단서가 된다.
   </div>
 
-  <h3>7.6 Iteration 14 — 복구 (score 0.969)</h3>
+  <h3>7.4 Phase 2 회복 — 안전하지만 느린 곡선</h3>
   <p>
-    여러 차례 regression 후 iter 14에서 다시 OPTIMAL 회복:
+    이후 iteration들은 "일단 다 풀리게" 만드는 보수적 변형으로 점진 회복한다. solved 10/10이지만 dtime은 baseline보다 느리다(speedup &lt; 1).
   </p>
-  <pre><code>iter 14: combined_score = 0.9690
-         geomean_speedup = 1.0113
-         geomean_wall_speedup = 1.2008
-         efficiency = 0.8794
-         solved_rate = 1.0</code></pre>
-  <p>
-    Parent는 iter 4 (<code>04718c2f</code>, score 0.7969)의 자식이지만 iter 1의 검증된 SIZE_BUCKETS 패턴으로 회귀. 즉 LLM이 artifact를 통해 "3e69d6f5b7에서 무엇이 깨졌는지" 학습 후 안전한 영역으로 복귀.
-  </p>
+  <pre><code>iter 1 (4a07c113): combined_score=0.8807  geomean_speedup=0.881   solved 10/10
+iter 3 (2fa91fef): combined_score=0.9771  geomean_speedup=0.901
+iter 9 (5e2691fb): combined_score=0.9905  geomean_speedup=0.946</code></pre>
+  <div class="callout">
+    <strong>국소 최적의 함정.</strong> regression은 사라졌지만(solved 10/10) 모두 <code>geomean_speedup &lt; 1.0</code> — baseline보다 dtime을 더 쓴다. LLM은 "안전한 0.9x"에 머물러 0점은 피했으나 phase1 수준(1.18)엔 못 미치고, stage1 gate를 못 넘어 stage2로도 진입하지 못한다.
+  </div>
 
-  <h3>7.7 종합 — Phase2가 보여주는 OpenEvolve 동작 양상</h3>
+  <h3>7.5 Phase 2 돌파 — iter 23, 근본 원인 진단 (1.4582)</h3>
+  <p>
+    iter 23에서 LLM이 thinking 로그에 root cause를 적고 직접 고친다:
+  </p>
+  <div class="callout">
+    <em>"Phase1 winner가 <code>use_feasibility_jump=True</code>를 켠 듯하다. W=1에서는 이게 유일 solver로 돌아 LP-heavy 문제에서 optimality 증명 없이 FEASIBLE로 끝난다. 조기 종료를 유발하는 두 휴리스틱을 명시적으로 끈다."</em>
+  </div>
+  <pre><code>GLOBAL_OVERRIDES = {
+    "cp_model_probing_level": 2, "symmetry_level": 1,
+    "use_feasibility_jump": False,   # ← root-cause fix
+    "use_feasibility_pump": False,
+    "stop_after_first_solution": False, "use_lns_only": False,
+}
+SIZE_BUCKETS = [
+    (50_000,  {probing2, cut_level1, add_mir_cuts, add_zero_half_cuts}),  # 작은 문제
+    (150_000, {probing2, cut_level1}),                                    # 중간
+    (inf,     {probing1, linearization_level1}),                         # 큰 LP-heavy
+]</code></pre>
+  <div class="callout ok">
+    <strong>돌파.</strong> stage1 gate 통과 → 전체 cascade(stage4, 20문제) 진입. <code>combined_score=1.4582, geomean_speedup=1.1786 (+17.9%), efficiency=1.8948</code>. phase1과 동일한 속도 수준을 <em>더 안전한 config</em>로 회복 — 즉 phase2의 본질은 "신규 이득"이 아니라 <em>체이닝이 만든 regression을 진단·복구</em>한 것.
+  </div>
+
+  <h3>7.6 Phase 2 실패들 — 좁은 표면의 대가</h3>
+  <p>
+    presolve/probing 표면은 이미 잘 도는 baseline 위라 변형 여지가 좁다. 한 발만 잘못 디뎌도 OPTIMAL→UNKNOWN이 나고, 돌파 이후에도 다른 가지에서 같은 종류의 regression이 반복된다.
+  </p>
+  <pre><code>iter 25, 32: combined_score=0.0000
+             error="result regression on dd4063e9bc: baseline=OPTIMAL got=UNKNOWN"
+LLM 생성 timeout: iter 5,10,12,18,19,22,30,35  (claude_code 3-retry 후 skip)</code></pre>
+  <div class="callout danger">
+    <strong>그래도 수렴하는 이유.</strong> MAP-Elites + island가 0점 가지를 버리고, artifact의 <code>result_mismatch</code>가 LLM을 반복적으로 안전 영역으로 끌어와 iter 23 돌파를 가능케 했다. 점수만 줬다면 불가능한 인과적 디버깅 — artifact 피드백의 가치다.
+  </div>
+
+  <h3>7.7 Phase 3 — LP / cuts (W=8): 평탄한 표면</h3>
+  <p>
+    Phase3는 phase1+2 winner를 상속하고 8-worker로 LP/cuts 표면을 튠다. 시작부터 이미 baseline 수준(상속 config가 강함).
+  </p>
+  <pre><code>initial c2e091f9: combined_score=0.9930  geomean_speedup=0.9930  (solved 10/10, W=8)
+winner  620d4019: combined_score=1.0225  geomean_speedup=0.9778  efficiency=1.1437
+         🌟 new best @ iter 3, 27</code></pre>
+  <p>winner config (요약):</p>
+  <pre><code>GLOBAL: max_num_cuts=6000, root_lp_iterations=3500, symmetry_level=3,
+        interleave_search=True, share_glue_clauses=True, solution_pool_size=8
+SIZE_BUCKETS[small]: probing3 + linearization2 + cut_level2
+SIZE_BUCKETS[large]: root_lp_iterations=5000 + MIR/zero-half cuts</code></pre>
+
+  <p>
+    그런데 winner의 <code>combined_score 1.0225</code>는 speedup가 아니라 <strong>efficiency factor가 끌어올린 값</strong>이다:
+  </p>
+  <pre><code>combined_score = geomean_speedup × efficiency^STATS_WEIGHT × solved_rate²
+              ≈   0.9778        × 1.1437^0.333
+              ≈   0.9778        × 1.046              ≈ 1.0225</code></pre>
+  <div class="callout danger">
+    <strong>한계 효용(diminishing returns).</strong> deterministic_time(0.978)은 오히려 baseline보다 <strong>2.2% 느리다</strong>. 줄어든 branch/conflict(efficiency 1.14)가 점수를 1 위로 들어올렸을 뿐, 실질 속도 개선이 아니다. 쉬운 이득은 phase1/2가 이미 가져갔고 LP/cuts 표면은 이 시점에 거의 평탄하다. <em>score 숫자를 해석할 땐 어떤 항이 들어올렸는지 봐야 한다.</em>
+  </div>
+
+  <h3>7.8 종합 — 3-Phase가 보여주는 OpenEvolve 동작 양상</h3>
   <table>
-    <thead><tr><th>특징</th><th>이 로그에서 확인된 증거</th></tr></thead>
+    <thead><tr><th>Phase</th><th>표면 / W</th><th>initial</th><th>winner</th><th>geomean_speedup (dtime)</th><th>양상</th></tr></thead>
     <tbody>
-      <tr><td>Phase 체이닝</td><td>phase1 best (<code>cp_model_probing_level=1</code>)이 phase2 initial로 import. 시작 점수 이미 0.9976.</td></tr>
-      <tr><td>점진적 개선</td><td>iter 1: 0.9976 → 1.0000 (+0.0024). 점프가 아닌 미세 조정.</td></tr>
-      <tr><td>Efficiency vs Wall 트레이드오프</td><td>iter 1은 wall은 약간 느려졌지만 efficiency가 좋아져 종합 점수 상승.</td></tr>
-      <tr><td>STAGE3_OVERRIDES 활용</td><td>LLM이 "outlier 전용 공격적 설정"을 분리 — stage1/2 안전, stage3에만 적용.</td></tr>
-      <tr><td>반복적 동일 문제 실패</td><td>iter 7~13: 같은 문제(<code>3e69d6f5b7</code>)에서 반복 UNKNOWN — phase2 변형이 이 문제 구조를 깸.</td></tr>
-      <tr><td>Artifact 학습 복구</td><td>iter 14에서 LLM이 regression 메시지를 보고 안전 영역으로 회귀.</td></tr>
-      <tr><td>Cascade 평가</td><td>모든 iteration이 stage1만 평가됨 — 점수 1.0 이상 도달 못 해 stage2 진입 못 함 (phase2의 한계).</td></tr>
+      <tr><td>1</td><td>search/subsolvers · W1</td><td>0.7123</td><td><strong>1.4582</strong></td><td>1.1786 (+17.9%)</td><td>탐색 — 큰 도약</td></tr>
+      <tr><td>2</td><td>presolve/probing · W1</td><td>0.0000</td><td><strong>1.4582</strong></td><td>1.1786</td><td>진단·복구 — root-cause fix</td></tr>
+      <tr><td>3</td><td>lp/cuts · W8</td><td>0.9930</td><td>1.0225</td><td>0.9778 (−2.2%)</td><td>평탄 — 한계 효용</td></tr>
     </tbody>
   </table>
 
-  <p>
-    20 iteration 후 phase2의 best 변형은 <strong>iter 1</strong> (<code>combined_score=1.0000</code>, SIZE_BUCKETS + STAGE3_OVERRIDES 추가). 이 best가 추출돼 phase3의 <code>initial_program.py</code>로 import되고 다음 표면(LP/cuts) 튜닝이 시작된다.
-  </p>
-
   <div class="callout ok">
-    <strong>Phase1 vs Phase2 비교.</strong> Phase1은 score 0 → 1.0822로 큰 도약 (탐색). Phase2는 0.9976 → 1.0000으로 미세 조정 (수렴). 두 phase의 진화 양상이 본질적으로 다르며, 이게 OpenEvolve의 multi-phase cascade가 단계마다 적절한 최적화를 하는 이유.
+    <ol style="margin:0; padding-left:20px;">
+      <li><strong>체이닝은 이득과 regression을 함께 전달한다.</strong> phase2 시작 0점은 phase1이 켠 휴리스틱 탓 — artifact가 LLM의 root-cause 진단을 가능케 했다.</li>
+      <li><strong>score 식 해석에 주의.</strong> phase3는 dtime&lt;1인데도 efficiency factor가 combined_score를 1 위로 들어올린다. 숫자 하나만 보면 오해할 수 있다.</li>
+      <li><strong>모든 phase가 이득을 내진 않는다.</strong> phase3는 평탄 — 그게 정상이고, cascade는 "어디서 멈출지"를 보여준다.</li>
+    </ol>
   </div>
 </section>
 
