@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the project files into the container
 COPY . /app
 
-# Install Python dependencies
-RUN pip install --root-user-action=ignore -e .
+# Install Python dependencies. claude-code extra pulls in claude-agent-sdk
+# AND opentelemetry-api (SDK injects W3C trace context; missing OTEL emits
+# noisy DEBUG tracebacks each call).
+RUN pip install --root-user-action=ignore -e ".[claude-code]"
 
 # Expose the project directory as a volume
 VOLUME ["/app"]

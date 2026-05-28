@@ -205,6 +205,10 @@ class OpenEvolve:
         )
         root_logger.addHandler(file_handler)
 
+        # Expose resolved path so worker processes can attach their own
+        # FileHandler to the same file (see process_parallel._worker_init).
+        self.log_file = log_file
+
         # Add console handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
@@ -334,6 +338,10 @@ class OpenEvolve:
                 self.evolution_tracer,
                 file_suffix=self.config.file_suffix,
             )
+            # Forward resolved log file so workers can append DEBUG output
+            # (LLM thinking, prompts, etc.) to the same file the controller
+            # writes to. Without this, worker logs only reach stderr.
+            self.parallel_controller.log_file = getattr(self, "log_file", None)
 
             # Set up signal handlers for graceful shutdown
             def signal_handler(signum, frame):

@@ -60,19 +60,25 @@ def main():
 
     try:
         from ortools.sat.python import cp_model
+        from ortools.sat import sat_parameters_pb2
     except ImportError as e:
         emit({"result": "Unknown", "elapsed_ms": 0,
-              "error": f"ortools.sat.python.cp_model import: {e}"})
+              "error": f"ortools.sat import: {e}"})
         return
 
     solver = cp_model.CpSolver()
 
+    # Build params on a standalone SatParameters protobuf (full protobuf API:
+    # scalars, repeated scalars, AND nested repeated messages like
+    # subsolver_params), then assign it wholesale. The pybind-wrapped
+    # solver.parameters in recent ortools (9.15+) cannot mutate nested message
+    # elements in place, but assigning a complete proto to it works on both the
+    # wrapped and the classic protobuf bindings.
+    params_proto = sat_parameters_pb2.SatParameters()
+
     # Hard wall-clock cap on the solver side too. Parent subprocess.run adds
     # an outer +15s grace.
-    try:
-        solver.parameters.max_time_in_seconds = float(timeout_s)
-    except Exception:
-        pass
+    params_proto.max_time_in_seconds = float(timeout_s)
 
     # Filter out keys that aren't real CpSolverParameters proto fields.
     # `timeout_sec` and `tuned` appear in raw-data applied_params but are
@@ -86,11 +92,56 @@ def main():
         if k in _DROP:
             continue
         try:
-            field = getattr(solver.parameters, k)
+            field = getattr(params_proto, k)
         except AttributeError as e:
             emit({"invalid_param": k, "error": str(e),
                   "result": "Unknown", "elapsed_ms": 0})
             return
+        # subsolver_params is a repeated MESSAGE field (repeated SatParameters):
+        # each entry defines a NAMED parameter set for a single custom subsolver,
+        # referenced from extra_subsolvers by `name`. The generic list branch
+        # below can't handle this (extend() rejects dicts), so build the nested
+        # messages explicitly. Each entry: {"name": str, <scalar/list fields>...}.
+        if k == "subsolver_params":
+            if not isinstance(v, list):
+                emit({"invalid_param": k,
+                      "error": "subsolver_params must be a list of dicts",
+                      "result": "Unknown", "elapsed_ms": 0})
+                return
+            del field[:]
+            for entry in v:
+                if not isinstance(entry, dict):
+                    emit({"invalid_param": k,
+                          "error": f"subsolver_params entry not a dict: {entry!r}",
+                          "result": "Unknown", "elapsed_ms": 0})
+                    return
+                sub = field.add()
+                for sk, sv in entry.items():
+                    try:
+                        subfield = getattr(sub, sk)
+                    except AttributeError as e:
+                        emit({"invalid_param": f"subsolver_params.{sk}",
+                              "error": str(e),
+                              "result": "Unknown", "elapsed_ms": 0})
+                        return
+                    if isinstance(sv, list):
+                        try:
+                            del subfield[:]
+                            subfield.extend(sv)
+                        except (AttributeError, TypeError) as e:
+                            emit({"invalid_param": f"subsolver_params.{sk}",
+                                  "error": f"list assign: {type(e).__name__}: {e}",
+                                  "result": "Unknown", "elapsed_ms": 0})
+                            return
+                    else:
+                        try:
+                            setattr(sub, sk, sv)
+                        except (AttributeError, TypeError, ValueError) as e:
+                            emit({"invalid_param": f"subsolver_params.{sk}",
+                                  "error": f"{type(e).__name__}: {e}",
+                                  "result": "Unknown", "elapsed_ms": 0})
+                            return
+            continue
         if isinstance(v, list):
             try:
                 del field[:]
@@ -102,7 +153,7 @@ def main():
                 return
         else:
             try:
-                setattr(solver.parameters, k, v)
+                setattr(params_proto, k, v)
             except AttributeError as e:
                 emit({"invalid_param": k, "error": str(e),
                       "result": "Unknown", "elapsed_ms": 0})
@@ -112,6 +163,9 @@ def main():
                       "error": f"{type(e).__name__}: {e}",
                       "result": "Unknown", "elapsed_ms": 0})
                 return
+
+    # Hand the fully-built proto to the solver (replaces its internal params).
+    solver.parameters = params_proto
 
     try:
         model = load_problem(problem_path)

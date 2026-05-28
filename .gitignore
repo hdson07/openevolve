@@ -62,3 +62,12 @@ input/cpsat-bench/raw-data
 # z3-bench evolve run artifacts (locally regenerated)
 input/z3-bench/evolve/shared/local_baseline.json
 input/z3-bench/evolve/shared/phase*_best.json
+
+# cpsat-bench evolve run artifacts (locally regenerated)
+input/cpsat-bench/evolve/shared/local_baseline.json
+input/cpsat-bench/evolve/shared/outliers.json
+input/cpsat-bench/evolve/shared/has_objective_cache.json
+input/cpsat-bench/evolve/shared/*_sample.json
+input/cpsat-bench/evolve/shared/phase*_best.json
+input/cpsat-bench/evolve/shared/phase*_buckets.json
+input/cpsat-bench/evolve/shared/phase*_stage3.json

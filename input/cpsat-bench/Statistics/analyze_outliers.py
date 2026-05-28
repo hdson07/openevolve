@@ -38,6 +38,17 @@ DEFAULT_RAW = HERE.parent / "raw-data"
 DEFAULT_OUT = HERE
 
 
+def has_objective_set(raw_dir: Path) -> set:
+    """SHAs whose .cpsat.pb carries an objective."""
+    out = set()
+    for p in sorted(raw_dir.glob("*.cpsat.pb")):
+        m = cp_model_pb2.CpModelProto()
+        m.ParseFromString(p.read_bytes())
+        if m.HasField("objective") or m.HasField("floating_point_objective"):
+            out.add(p.name[: -len(".cpsat.pb")])
+    return out
+
+
 # ---------- meta load ----------
 
 def load_meta(raw_dir: Path) -> list[dict]:
@@ -239,6 +250,11 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--top-k", type=int, default=30, help="Number of outliers to deep-dive")
     ap.add_argument("--baseline-k", type=int, default=60, help="Inlier sample size for comparison")
+    ap.add_argument(
+        "--optimize-only",
+        action="store_true",
+        help="Restrict analysis to problems whose .cpsat.pb carries an objective.",
+    )
     args = ap.parse_args()
 
     if not args.raw_dir.is_dir():
@@ -248,6 +264,15 @@ def main() -> int:
     rows = load_meta(args.raw_dir)
     records = flatten(rows)
     print(f"loaded {len(records)} instances")
+
+    if args.optimize_only:
+        obj_shas = has_objective_set(args.raw_dir)
+        before = len(records)
+        records = [r for r in records if r.get("problem_sha256") in obj_shas]
+        print(f"objective filter: kept {len(records)}/{before} instances")
+        if not records:
+            print("ERROR no instances with objective", file=sys.stderr)
+            return 1
 
     _resid, info, kept = fit_residuals(records)
     print(f"baseline log10 fit: a_vars={info['a_vars']:.3f} b_cons={info['b_constraints']:.3f} "

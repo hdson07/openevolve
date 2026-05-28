@@ -13,6 +13,9 @@ Schema:
         - dir: phase2_y
         ...
       unified_prepare_script: prepare_phase_unified.py    # optional
+      unified_prepare_before_dir: phase4_unified          # optional; fire prep
+                                                          #   before this dir
+                                                          #   (default: last phase)
       solver_check_cmd: 'python -c "from ortools.sat.python import cp_model"'
       solver_install_hint: install pip install ortools
       rebaseline_script: rebaseline_local.py              # optional override
@@ -94,6 +97,7 @@ def main():
         _emit("PHASE_ITERS", " ".join(iters))
 
     _emit("UNIFIED_PREPARE_SCRIPT", bench.get("unified_prepare_script"))
+    _emit("UNIFIED_PREPARE_BEFORE_DIR", bench.get("unified_prepare_before_dir"))
     _emit("SOLVER_CHECK_CMD", bench.get("solver_check_cmd"))
     _emit("SOLVER_INSTALL_HINT", bench.get("solver_install_hint"))
     _emit("REBASELINE_SCRIPT", bench.get("rebaseline_script"))

@@ -88,11 +88,29 @@ async def run_iteration_with_shared_db(
         result = Result(parent=parent)
         iteration_start = time.time()
 
+        logger.debug(
+            f"[iter {iteration+1}] parent={parent.id[:8]} "
+            f"island={parent_island} "
+            f"prompt_sys_chars={len(prompt['system'])} "
+            f"prompt_user_chars={len(prompt['user'])}"
+        )
+        logger.debug(
+            f"[iter {iteration+1}] prompt.user head:\n{prompt['user'][:1500]}"
+        )
+
         # Generate code modification
         llm_response = await llm_ensemble.generate_with_context(
             system_message=prompt["system"],
             messages=[{"role": "user", "content": prompt["user"]}],
         )
+
+        logger.debug(
+            f"[iter {iteration+1}] llm_response chars={len(llm_response) if llm_response else 0}"
+        )
+        if llm_response:
+            logger.debug(
+                f"[iter {iteration+1}] llm_response head:\n{llm_response[:2000]}"
+            )
 
         # Parse the response
         if config.diff_based_evolution:
@@ -142,6 +160,10 @@ async def run_iteration_with_shared_db(
                     max_line_len=config.prompt.diff_summary_max_line_len,
                     max_lines=config.prompt.diff_summary_max_lines,
                 )
+            logger.debug(
+                f"[iter {iteration+1}] diff_blocks={len(diff_blocks)} "
+                f"changes_summary:\n{changes_summary}"
+            )
         else:
             # Parse full rewrite
             new_code = parse_full_rewrite(llm_response, config.language)

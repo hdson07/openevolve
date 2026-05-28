@@ -27,11 +27,14 @@ Environment overrides:
 import importlib.util
 import inspect
 import json
+import logging
 import math
 import os
 import pathlib
 import sys
 import traceback
+
+logger = logging.getLogger(__name__)
 
 TIMEOUT_FACTOR = 1.3
 MIN_TIMEOUT_S = 5
@@ -266,6 +269,24 @@ def _evaluate(program_path, problems, stage_name):
     # Per-phase lock (worker count varies by phase) overrides the global lock.
     phase_locked = getattr(program, "PHASE_LOCKED", None)
     locked = phase_locked if isinstance(phase_locked, dict) else LOCKED
+
+    # DEBUG: surface the resolved global params delta vs BASELINE so the run
+    # log shows exactly which knobs the LLM mutated this iteration.
+    if logger.isEnabledFor(logging.DEBUG):
+        global_delta = {
+            k: params[k] for k in params
+            if k not in locked and params.get(k) != BASELINE.get(k)
+        }
+        logger.debug(
+            f"[{stage_name}] resolved_global_delta_vs_baseline={global_delta} "
+            f"program={pathlib.Path(program_path).name} "
+            f"phase_locked={dict(locked) if isinstance(locked, dict) else locked}"
+        )
+        for attr in ("GLOBAL_OVERRIDES", "SIZE_BUCKETS", "STAGE3_OVERRIDES"):
+            val = getattr(program, attr, None)
+            if val:
+                logger.debug(f"[{stage_name}] {attr}={val}")
+
     violations = {k: params.get(k) for k in locked if params.get(k) != locked[k]}
     if violations:
         return _err_result(
@@ -355,6 +376,16 @@ def _evaluate(program_path, problems, stage_name):
             per_params[k] = v
         if "num_search_workers" in params:
             per_params["num_search_workers"] = params["num_search_workers"]
+        if logger.isEnabledFor(logging.DEBUG):
+            per_delta = {k: per_params[k] for k in per_params
+                         if per_params.get(k) != params.get(k)}
+            if per_delta:
+                logger.debug(
+                    f"[{stage_name}] sha={p['sha'][:10]} "
+                    f"num_constraints={p['num_constraints']} "
+                    f"is_outlier={p['is_outlier']} "
+                    f"per_problem_delta_vs_global={per_delta}"
+                )
         core = _core_pool.get()
         try:
             r = run_cpsat(input_path, per_params, timeout_s,

@@ -64,6 +64,21 @@ else
     fi
 fi
 
+# 3b. opentelemetry-api: SDK's subprocess_cli.py imports `opentelemetry` to
+# inject W3C trace context; missing module is non-fatal but logs a full
+# traceback at DEBUG every call. Ensure present regardless of whether step 3
+# ran a fresh install (existing containers may have SDK but not OTEL).
+if python -c "import opentelemetry" 2>/dev/null; then
+    log "opentelemetry-api present"
+else
+    log "opentelemetry-api missing -> pip install opentelemetry-api"
+    if pip install --quiet "opentelemetry-api>=1.20.0"; then
+        log "installed opentelemetry-api"
+    else
+        warn "pip install opentelemetry-api failed; DEBUG logs will show OTEL traceback"
+    fi
+fi
+
 # 4. Auth sanity check
 if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
     log "auth env var present"

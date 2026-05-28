@@ -327,17 +327,28 @@ run_one_phase() {
         return 0
     fi
 
-    # Unified-prep on the last phase
-    if [ "$phase" -eq "$LAST_PHASE" ] && [ -n "${UNIFIED_PREPARE_SCRIPT:-}" ]; then
+    # Unified-prep: materialize a phase's EVOLVE-BLOCK from prior-phase winners.
+    # Fires before the configured UNIFIED_PREPARE_BEFORE_DIR (so a later phase
+    # can still follow the unified phase); falls back to the last phase when the
+    # key is unset (legacy benches with the unified phase terminal).
+    local prep_here=0
+    if [ -n "${UNIFIED_PREPARE_SCRIPT:-}" ]; then
+        if [ -n "${UNIFIED_PREPARE_BEFORE_DIR:-}" ]; then
+            [ "$dir" = "$UNIFIED_PREPARE_BEFORE_DIR" ] && prep_here=1
+        elif [ "$phase" -eq "$LAST_PHASE" ]; then
+            prep_here=1
+        fi
+    fi
+    if [ "$prep_here" = "1" ]; then
         local missing=0
-        for ((i = 1; i < LAST_PHASE; i++)); do
+        for ((i = 1; i < phase; i++)); do
             if [ ! -f "$ROOT/shared/phase${i}_best.json" ]; then
-                echo "phase $LAST_PHASE requires shared/phase${i}_best.json (run phase $i first)" >&2
+                echo "phase $phase ($dir) requires shared/phase${i}_best.json (run phase $i first)" >&2
                 missing=1
             fi
         done
         [ "$missing" = "1" ] && return 1
-        echo "[run_phase] materializing phase$LAST_PHASE EVOLVE-BLOCK via $UNIFIED_PREPARE_SCRIPT..."
+        echo "[run_phase] materializing $dir EVOLVE-BLOCK via $UNIFIED_PREPARE_SCRIPT..."
         python "$ROOT/$UNIFIED_PREPARE_SCRIPT"
     fi
 

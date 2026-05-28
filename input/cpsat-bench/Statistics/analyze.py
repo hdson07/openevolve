@@ -41,6 +41,22 @@ DEFAULT_OUT = HERE
 
 # ---------- loading ----------
 
+def has_objective_set(raw_dir: Path) -> set[str] | None:
+    """Return set of SHAs whose .cpsat.pb carries an objective. None if
+    ortools unavailable."""
+    try:
+        from ortools.sat import cp_model_pb2
+    except ImportError:
+        return None
+    out: set[str] = set()
+    for p in sorted(raw_dir.glob("*.cpsat.pb")):
+        m = cp_model_pb2.CpModelProto()
+        m.ParseFromString(p.read_bytes())
+        if m.HasField("objective") or m.HasField("floating_point_objective"):
+            out.add(p.name[: -len(".cpsat.pb")])
+    return out
+
+
 def load_meta(raw_dir: Path) -> list[dict]:
     rows: list[dict] = []
     for path in sorted(raw_dir.glob("*.meta.jsonl")):
@@ -437,6 +453,12 @@ def main() -> int:
     ap.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--no-plots", action="store_true")
+    ap.add_argument(
+        "--optimize-only",
+        action="store_true",
+        help="Restrict analysis to problems whose .cpsat.pb carries an "
+             "objective (drops feasibility-only instances).",
+    )
     args = ap.parse_args()
 
     if not args.raw_dir.is_dir():
@@ -448,6 +470,19 @@ def main() -> int:
     rows = load_meta(args.raw_dir)
     records = extract(rows)
     print(f"loaded {len(records)} instances from {args.raw_dir}")
+
+    if args.optimize_only:
+        obj_shas = has_objective_set(args.raw_dir)
+        if obj_shas is None:
+            print("warning: --optimize-only requested but ortools unavailable "
+                  "— keeping all instances", file=sys.stderr)
+        else:
+            before = len(records)
+            records = [r for r in records if r.get("problem_sha256") in obj_shas]
+            print(f"objective filter: kept {len(records)}/{before} instances")
+            if not records:
+                print("ERROR no instances with objective", file=sys.stderr)
+                return 1
 
     write_report(records, args.out / "report.txt")
     write_csv(records, args.out / "per_instance.csv")

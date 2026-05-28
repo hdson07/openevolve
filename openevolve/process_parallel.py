@@ -44,6 +44,37 @@ def _worker_init(config_dict: dict, evaluation_file: str, parent_env: dict = Non
     if parent_env:
         os.environ.update(parent_env)
 
+    # Workers spawn with default WARNING root logger, so DEBUG/INFO from
+    # iteration.py / llm code never fire unless we configure here. Mirror the
+    # controller's log_level and attach handlers so logs surface in the
+    # run_phase.sh terminal AND get appended to the controller's log file
+    # (LLM thinking / prompts / param deltas otherwise live only on stderr).
+    _wlvl = getattr(logging, str(config_dict.get("log_level", "INFO")).upper(), logging.INFO)
+    _root = logging.getLogger()
+    _root.setLevel(_wlvl)
+    _fmt = logging.Formatter(
+        f"%(asctime)s - pid{os.getpid()} - %(name)s - %(levelname)s - %(message)s"
+    )
+    if not any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in _root.handlers
+    ):
+        _sh = logging.StreamHandler()
+        _sh.setFormatter(_fmt)
+        _root.addHandler(_sh)
+    _log_file = config_dict.get("log_file")
+    if _log_file and not any(
+        isinstance(h, logging.FileHandler)
+        and getattr(h, "baseFilename", None) == os.path.abspath(_log_file)
+        for h in _root.handlers
+    ):
+        try:
+            _fh = logging.FileHandler(_log_file)
+            _fh.setFormatter(_fmt)
+            _root.addHandler(_fh)
+        except OSError:
+            pass  # worker can't write — fall back to stderr only
+
     global _worker_config
     global _worker_evaluation_file
     global _worker_evaluator
@@ -84,7 +115,7 @@ def _worker_init(config_dict: dict, evaluation_file: str, parent_env: dict = Non
         **{
             k: v
             for k, v in config_dict.items()
-            if k not in ["llm", "prompt", "database", "evaluator"]
+            if k not in ["llm", "prompt", "database", "evaluator", "log_file"]
         },
     )
     _worker_evaluation_file = evaluation_file
@@ -386,6 +417,7 @@ class ProcessParallelController:
             "checkpoint_interval": config.checkpoint_interval,
             "log_level": config.log_level,
             "log_dir": config.log_dir,
+            "log_file": getattr(self, "log_file", None),
             "random_seed": config.random_seed,
             "diff_based_evolution": config.diff_based_evolution,
             "max_code_length": config.max_code_length,

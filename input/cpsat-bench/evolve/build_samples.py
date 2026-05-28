@@ -27,6 +27,7 @@ Stage3 sample also writes shared/outliers.json (sha -> {residual, baseline_ms,
 n_cons, n_vars}) so the evaluator can mark `is_outlier` on problem records and
 phase initial_program.py can branch STAGE3_OVERRIDES on it.
 """
+import argparse
 import csv
 import json
 import pathlib
@@ -60,10 +61,14 @@ STAGE2_N = 10
 STAGE3_N = 5
 STAGE4_N = 20
 N_BUCKETS = 5
-# Large profile: single hardest outlier (top residual from outliers_top.csv).
-# Tune higher if want to evaluate against more outliers at the cost of
-# proportionally longer per-iteration eval time.
+# Large profile: pick from outliers_top.csv.
+#   STAGE1_LARGE_N         how many outliers in the sample
+#   STAGE1_LARGE_SORT_BY   "elapsed_ms" → slowest first (large-runtime tuning);
+#                          "residual"   → most out-of-line vs predicted size.
+# Make sure evaluator.timeout in config.yaml covers worst-case
+# baseline_ms * 1.3 (= variant timeout).
 STAGE1_LARGE_N = 1
+STAGE1_LARGE_SORT_BY = "elapsed_ms"
 # Global cap for stage1/2/4 sample pool. Anything slower than 2 min skews
 # the quintile clustering.
 MAX_BASELINE_MS = 120_000
@@ -78,8 +83,8 @@ STAGE3_MAX_BASELINE_MS = 1_500_000
 # pick STAGE3_N outliers whose baseline elapsed_ms is closest to
 # STAGE3_TARGET_MS, dropping any whose ratio to target exceeds
 # STAGE3_TARGET_TOL_RATIO (e.g. target=20000 tol=5.0 → accepts 4000..100000ms).
-STAGE3_TARGET_MS = 20_000
-STAGE3_TARGET_TOL_RATIO = 5.0
+STAGE3_TARGET_MS = 500_000
+STAGE3_TARGET_TOL_RATIO = 500.0
 OUTLIER_IQR_K = 3.0
 
 STAGE1_STRATEGY = "center"
@@ -102,6 +107,46 @@ def _scan_raw():
         d = json.loads(line)
         rows.append(d)
     return rows
+
+
+def _has_objective_set():
+    """Scan raw-data/*.cpsat.pb once and return the set of SHAs whose
+    CpModelProto carries an objective (either `objective` or
+    `floating_point_objective`). Cached to shared/has_objective_cache.json so
+    re-runs skip the parse cost."""
+    cache_path = _HERE / "shared" / "has_objective_cache.json"
+    pb_files = sorted(_RAW.glob("*.cpsat.pb"))
+    pb_count = len(pb_files)
+
+    if cache_path.exists():
+        try:
+            cache = json.loads(cache_path.read_text())
+            if cache.get("pb_count") == pb_count:
+                return set(cache.get("with_objective") or [])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    try:
+        from ortools.sat import cp_model_pb2
+    except ImportError as e:
+        print(f"warning: ortools missing; cannot filter by objective: {e}",
+              file=sys.stderr)
+        return None
+
+    with_obj = []
+    for p in pb_files:
+        m = cp_model_pb2.CpModelProto()
+        m.ParseFromString(p.read_bytes())
+        if m.HasField("objective") or m.HasField("floating_point_objective"):
+            # Strip ".cpsat.pb" suffix to recover bare SHA (matches
+            # problem_sha256 in meta.jsonl). pathlib's .stem only drops one
+            # extension, leaving "<sha>.cpsat".
+            with_obj.append(p.name[:-len(".cpsat.pb")])
+    cache_path.write_text(json.dumps(
+        {"pb_count": pb_count, "with_objective": with_obj}, indent=2) + "\n")
+    print(f"objective scan: {len(with_obj)}/{pb_count} problems have objective"
+          f" (cached at {cache_path.relative_to(_BENCH.parent)})")
+    return set(with_obj)
 
 
 def _runtime_key(d):
@@ -380,10 +425,36 @@ def _write_sample(path, picks, label, criteria):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--optimize-only",
+        action="store_true",
+        help="Filter the sample pool to problems whose CpModelProto carries "
+             "an objective (drops pure-feasibility models). Default off — "
+             "keep all problems.",
+    )
+    args = ap.parse_args()
+
     rows = _scan_raw()
     if not rows:
         raise SystemExit(f"no *.meta.jsonl found under {_RAW}")
     print(f"scanned {len(rows)} problems")
+
+    if args.optimize_only:
+        obj_shas = _has_objective_set()
+        if obj_shas is None:
+            print("warning: --optimize-only requested but ortools unavailable "
+                  "— keeping all problems", file=sys.stderr)
+        else:
+            before = len(rows)
+            rows = [d for d in rows if _id_key(d) in obj_shas]
+            print(f"objective filter: kept {len(rows)}/{before} problems "
+                  f"(dropped feasibility-only)")
+            if not rows:
+                raise SystemExit("no problems with objective — nothing to sample")
+    else:
+        print("objective filter: OFF (use --optimize-only to drop "
+              "feasibility-only problems)")
 
     with open(_PROBLEMS, "w") as f:
         for d in rows:
@@ -471,12 +542,21 @@ def main():
                   f"{int(_runtime_key(d)):>7}ms")
 
     # ---- large profile sample (OPENEVOLVE_PROFILE=large) ----
-    # Single sample file with STAGE1_LARGE_N top-residual outliers (default 1).
-    # evaluator dispatches every cascade stage entry point to one outlier-set
-    # evaluation, so no stage2/3/4 split is needed.
+    # Single sample file with STAGE1_LARGE_N outliers, sorted by
+    # STAGE1_LARGE_SORT_BY ("elapsed_ms" → slowest baseline first; "residual"
+    # → highest log10 deviation first). evaluator dispatches every cascade
+    # stage entry point to one outlier-set evaluation, so no stage2/3/4 split.
     if csv_all:
         eligible = [c for c in csv_all if c["sha"] in rows_by_sha]
-        # csv_all already sorted by descending residual in _load_outliers_top.
+        if STAGE1_LARGE_SORT_BY == "elapsed_ms":
+            eligible.sort(key=lambda c: -c["elapsed_ms"])
+        elif STAGE1_LARGE_SORT_BY == "residual":
+            eligible.sort(key=lambda c: -c["residual"])
+        else:
+            raise ValueError(
+                f"unknown STAGE1_LARGE_SORT_BY: {STAGE1_LARGE_SORT_BY!r} "
+                f"(expected 'elapsed_ms' or 'residual')"
+            )
         large_picks = eligible[:STAGE1_LARGE_N]
         large_rows = [rows_by_sha[c["sha"]] for c in large_picks]
     else:
@@ -484,8 +564,8 @@ def main():
         large_rows = []
     _write_sample(
         _STAGE1_LARGE, large_rows, "stage1_large",
-        f"top-{STAGE1_LARGE_N} residual outlier(s) from outliers_top.csv "
-        f"(W=8 tuning set)",
+        f"top-{STAGE1_LARGE_N} outlier(s) from outliers_top.csv "
+        f"sorted by {STAGE1_LARGE_SORT_BY} (W=8 tuning set)",
     )
 
     # Clean up stale empty stage{2,3,4}_large files from older builds — they

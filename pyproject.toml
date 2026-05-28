@@ -31,6 +31,12 @@ dev = [
 ]
 claude-code = [
     "claude-agent-sdk>=0.2.82",
+    # claude-agent-sdk's subprocess_cli imports `opentelemetry` to inject W3C
+    # trace context into the spawned CLI. The import is wrapped in try/except,
+    # so a missing module is non-fatal at runtime, BUT under log_level=DEBUG
+    # the SDK logs the full ModuleNotFoundError traceback every call. Pull in
+    # the API package to silence the noise (no exporters needed for no-op).
+    "opentelemetry-api>=1.20.0",
 ]
 
 [tool.black]

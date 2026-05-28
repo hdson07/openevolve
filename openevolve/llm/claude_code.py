@@ -106,6 +106,10 @@ class ClaudeCodeLLM(LLMInterface):
             TextBlock,
             query,
         )
+        try:
+            from claude_agent_sdk import ThinkingBlock
+        except ImportError:
+            ThinkingBlock = None  # older SDK
 
         opts_kwargs: Dict[str, Any] = {
             "max_turns": 4,
@@ -126,11 +130,28 @@ class ClaudeCodeLLM(LLMInterface):
             opts_kwargs["cli_path"] = self.cli_path
         if self.cwd is not None:
             opts_kwargs["cwd"] = self.cwd
+        # When reasoning is requested (effort or max_thinking_tokens), default
+        # to adaptive thinking with `display=summarized` so ThinkingBlock
+        # actually carries text — Opus 4.7+ defaults display to "omitted"
+        # (signature-only), which would zero-out our DEBUG reasoning log.
+        # User can still override via claude_code_options.thinking.
+        if (effort is not None or self.max_thinking_tokens is not None) \
+                and "thinking" not in self.extra_sdk_options:
+            opts_kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
         opts_kwargs.update(self.extra_sdk_options)
 
         options = ClaudeAgentOptions(**opts_kwargs)
 
+        logger.debug(
+            f"[claude_code] query model={self.model} "
+            f"prompt_chars={len(prompt_text)} "
+            f"sys_chars={len(system_message) if system_message else 0} "
+            f"effort={opts_kwargs.get('effort')} "
+            f"max_thinking_tokens={opts_kwargs.get('max_thinking_tokens')}"
+        )
+
         text_chunks: List[str] = []
+        thinking_chunks: List[str] = []
         result_text: Optional[str] = None
 
         async for msg in query(prompt=prompt_text, options=options):
@@ -138,11 +159,18 @@ class ClaudeCodeLLM(LLMInterface):
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         text_chunks.append(block.text)
+                    elif ThinkingBlock is not None and isinstance(block, ThinkingBlock):
+                        thinking_chunks.append(block.thinking)
             elif isinstance(msg, ResultMessage):
                 result_text = getattr(msg, "result", None) or result_text
 
         final = result_text if result_text else "".join(text_chunks)
-        logger.debug(f"[claude_code] response chars={len(final)}")
+        thinking = "".join(thinking_chunks)
+        logger.debug(
+            f"[claude_code] response chars={len(final)} thinking_chars={len(thinking)}"
+        )
+        if thinking and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"[claude_code] thinking:\n{thinking}")
         return final
 
     @staticmethod
