@@ -90,6 +90,63 @@ _STAGE4_SAMPLE = _stage_sample(4)
 
 REBASELINE_TIMEOUT_S = 3600
 
+# Match the evaluator: small profile averages N repeats per solve so the
+# baseline is measured the SAME way variants are (fair dtime ratio). large
+# profile measures once. OPENEVOLVE_SOLVE_REPEATS overrides.
+N_REPEATS_SMALL = 10
+
+
+def _solve_repeats():
+    env = os.environ.get("OPENEVOLVE_SOLVE_REPEATS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    return N_REPEATS_SMALL if _profile() == "small" else 1
+
+
+def _average_runs(runs):
+    """Mean elapsed_ms / stats / objective over N run_cpsat dicts. Mirrors
+    evaluator._average_runs so baseline + variant are averaged identically."""
+    import collections
+    import statistics
+
+    if not runs:
+        return {"result": "Unknown", "elapsed_ms": 0, "stats": {}}
+    for r in runs:
+        if "invalid_param" in r:
+            return r
+    if len(runs) == 1:
+        return runs[0]
+
+    results = [r.get("result") for r in runs]
+    result = collections.Counter(results).most_common(1)[0][0]
+    elapsed = statistics.mean(r.get("elapsed_ms", 0) for r in runs)
+    timeout_any = any(r.get("timeout") for r in runs)
+
+    stat_keys = set()
+    for r in runs:
+        stat_keys |= set((r.get("stats") or {}).keys())
+    stats = {}
+    for k in stat_keys:
+        vals = [(r.get("stats") or {}).get(k) for r in runs]
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        if vals:
+            stats[k] = statistics.mean(vals)
+
+    out = {
+        "result": result,
+        "elapsed_ms": int(elapsed),
+        "timeout": timeout_any,
+        "stats": stats,
+        "n_repeats": len(runs),
+    }
+    objs = [r.get("objective") for r in runs if r.get("objective") is not None]
+    if objs:
+        out["objective"] = statistics.mean(objs)
+    return out
+
 
 def _load_problem_index():
     idx = {}
@@ -211,14 +268,21 @@ def _measure_at_workers(tasks, w, cores):
             return ",".join(str(x) for x in b)
         return str(b) if b is not None else "-"
 
-    print(f"  workers={w}: parallel={n_parallel} blocks={[_fmt(b) for b in blocks]}",
-          flush=True)
+    repeats = _solve_repeats()
+    print(f"  workers={w}: parallel={n_parallel} repeats={repeats} "
+          f"blocks={[_fmt(b) for b in blocks]}", flush=True)
 
     def _solve(task):
         i, meta, path = task
         block = pool.get()
         try:
-            res = run_cpsat(path, params, REBASELINE_TIMEOUT_S, cpu_core=block)
+            runs = []
+            for _ in range(repeats):
+                rr = run_cpsat(path, params, REBASELINE_TIMEOUT_S, cpu_core=block)
+                runs.append(rr)
+                if "invalid_param" in rr:
+                    break
+            res = _average_runs(runs)
         finally:
             pool.put(block)
         return i, meta, res, block

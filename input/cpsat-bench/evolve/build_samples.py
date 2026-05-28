@@ -433,6 +433,13 @@ def main():
              "an objective (drops pure-feasibility models). Default off — "
              "keep all problems.",
     )
+    ap.add_argument(
+        "--small",
+        action="store_true",
+        help="small-profile build: generate stage1 + stage2 only and leave "
+             "stage3 / stage4 empty (small cascade runs stage1+stage2). "
+             "Default off — generate all four stages.",
+    )
     args = ap.parse_args()
 
     rows = _scan_raw()
@@ -496,45 +503,54 @@ def main():
     s1 = _pick(STAGE1_STRATEGY, pool_c12, STAGE1_N)
     s2 = _pick(STAGE2_STRATEGY, pool_c34, STAGE2_N)
 
-    # Stage3: target-ms outlier pick from Statistics/outliers_top.csv —
-    # outliers whose baseline_ms is closest to STAGE3_TARGET_MS (within
-    # STAGE3_TARGET_TOL_RATIO). Keeps stage3 runtime variance low so cascade
-    # score is dominated by signal, not noise from a 1500ms vs 1500000ms split.
-    # Fallback to slow-cluster center pick if csv missing.
+    # outliers_top.csv feeds outliers.json (is_outlier flag + large-profile
+    # pick source) and, when generating all stages, the stage3 sample.
     rows_by_sha = {_id_key(d): d for d in rows}
     outliers_csv = _find_outliers_csv()
     s3_outliers, csv_all = _pick_outliers(rows_by_sha, outliers_csv,
                                           all_rows=rows) \
         if outliers_csv else (None, [])
-    if s3_outliers:
-        s3 = s3_outliers
-        stage3_criteria = (
-            f"outliers from {outliers_csv.name} nearest "
-            f"{STAGE3_TARGET_MS}ms (tol={STAGE3_TARGET_TOL_RATIO}x, "
-            f"cap={STAGE3_MAX_BASELINE_MS}ms; target {STAGE3_N})"
-        )
+
+    if args.small:
+        # small-profile build: stage1 + stage2 only. stage3 (outliers → large
+        # profile) and stage4 (broad spread) left empty; the small cascade in
+        # evaluator merges stage1+stage2.
+        _write_outliers_json([], csv_all)
+        _write_sample(_STAGE1, s1, "stage1", "decisive runtime clusters c1+c2 (fast group)")
+        _write_sample(_STAGE2, s2, "stage2", "decisive runtime clusters c3+c4 (mid group)")
+        _write_sample(_STAGE3, [], "stage3", "EMPTY — --small build (stage1+stage2 cascade)")
+        _write_sample(_STAGE4, [], "stage4", "EMPTY — --small build (stage1+stage2 cascade)")
+        printed_stages = (("stage1", s1), ("stage2", s2))
     else:
-        s3 = _center_pick(pool_c5, STAGE3_N)
-        stage3_criteria = ("FALLBACK: decisive runtime cluster c5 "
-                           "(outliers_top.csv unavailable or empty)")
+        # Default build: all four stages.
+        if s3_outliers:
+            s3 = s3_outliers
+            stage3_criteria = (
+                f"outliers from {outliers_csv.name} nearest "
+                f"{STAGE3_TARGET_MS}ms (tol={STAGE3_TARGET_TOL_RATIO}x, "
+                f"cap={STAGE3_MAX_BASELINE_MS}ms; target {STAGE3_N})"
+            )
+        else:
+            s3 = _center_pick(pool_c5, STAGE3_N)
+            stage3_criteria = ("FALLBACK: decisive runtime cluster c5 "
+                               "(outliers_top.csv unavailable or empty)")
 
-    _write_outliers_json(s3 if s3_outliers else [], csv_all)
+        _write_outliers_json(s3 if s3_outliers else [], csv_all)
 
-    # Stage4: broad spread across full decisive pool, dedup vs stage1-3.
-    used = {_id_key(d) for d in (s1 + s2 + s3)}
-    broad = sorted(
-        (d for d in candidates if _id_key(d) not in used),
-        key=_runtime_key,
-    )
-    s4 = _pick(STAGE4_STRATEGY, broad, STAGE4_N)
+        used = {_id_key(d) for d in (s1 + s2 + s3)}
+        broad = sorted(
+            (d for d in candidates if _id_key(d) not in used),
+            key=_runtime_key,
+        )
+        s4 = _pick(STAGE4_STRATEGY, broad, STAGE4_N)
 
-    _write_sample(_STAGE1, s1, "stage1", "decisive runtime clusters c1+c2 (fast group)")
-    _write_sample(_STAGE2, s2, "stage2", "decisive runtime clusters c3+c4 (mid group)")
-    _write_sample(_STAGE3, s3, "stage3", stage3_criteria)
-    _write_sample(_STAGE4, s4, "stage4", "broad runtime spread, dedup vs stage1-3")
+        _write_sample(_STAGE1, s1, "stage1", "decisive runtime clusters c1+c2 (fast group)")
+        _write_sample(_STAGE2, s2, "stage2", "decisive runtime clusters c3+c4 (mid group)")
+        _write_sample(_STAGE3, s3, "stage3", stage3_criteria)
+        _write_sample(_STAGE4, s4, "stage4", "broad runtime spread, dedup vs stage1-3")
+        printed_stages = (("stage1", s1), ("stage2", s2), ("stage3", s3), ("stage4", s4))
 
-    for label, picks in (("stage1", s1), ("stage2", s2),
-                         ("stage3", s3), ("stage4", s4)):
+    for label, picks in printed_stages:
         print(f"\n{label}:")
         for d in picks:
             print(f"  {_id_key(d)[:12]}  "

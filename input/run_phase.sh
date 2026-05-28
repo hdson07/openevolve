@@ -203,8 +203,14 @@ if [ "$EXTRACT_ONLY" != "1" ]; then
         need_build=1
     fi
     if [ "$need_build" = "1" ]; then
-        echo "[run_phase] sample json missing — running $BUILD_SAMPLES_SCRIPT first..."
-        python "$ROOT/$BUILD_SAMPLES_SCRIPT"
+        # small profile builds stage1+stage2 only (--small); large/default
+        # builds all four stages. Both emit stage1_large_sample.json.
+        build_args=()
+        if [ "$PROFILE" = "small" ]; then
+            build_args+=(--small)
+        fi
+        echo "[run_phase] sample json missing — running $BUILD_SAMPLES_SCRIPT ${build_args[*]}..."
+        python "$ROOT/$BUILD_SAMPLES_SCRIPT" "${build_args[@]+"${build_args[@]}"}"
     fi
 
     if [ -f "$ROOT/$REBASELINE_SCRIPT" ]; then

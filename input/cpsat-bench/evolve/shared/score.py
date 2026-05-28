@@ -154,8 +154,13 @@ def _score_cost(per_problem):
                 ratios.append(time_r)
                 wall_ratios.append(wall_r)
         else:
-            ratios.append(1e-6)
-            wall_ratios.append(1e-6)
+            # Non-decisive variant (UNKNOWN/INFEASIBLE on a decisive baseline).
+            # Use its REAL measured time_ratio instead of a 1e-6 sentinel — a
+            # variant that exhausted the timeout contributes its (slow) timeout
+            # ratio, not a fixed penalty. solved_rate (squared in combined)
+            # still drops, so a lost solve is penalized via that channel.
+            ratios.append(time_r)
+            wall_ratios.append(wall_r)
             regressions += 1
     if not ratios:
         return 1.0, 1.0, 0.0, 0, 0, 0, 0, 0

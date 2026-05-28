@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 TIMEOUT_FACTOR = 1.3
 MIN_TIMEOUT_S = 5
 
+# small profile repeats each solve N times and averages (deterministic_time
+# + wall + counters) to damp multi-worker run-to-run variance. large profile
+# (single huge outlier) runs once — repeating a ~10 min solve 10× is wasteful.
+# Override with OPENEVOLVE_SOLVE_REPEATS.
+N_REPEATS_SMALL = 10
+
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
@@ -46,7 +52,7 @@ from baseline_params import BASELINE, LOCKED  # noqa: E402
 from score import score  # noqa: E402
 from cpsat_runner import run_cpsat  # noqa: E402
 from runtime import (  # noqa: E402
-    parallel_solvers, cascade_threshold, core_range, alloc_core_blocks,
+    parallel_solvers, core_range, alloc_core_blocks,
 )
 
 from openevolve.evaluation_result import EvaluationResult  # noqa: E402
@@ -93,6 +99,9 @@ def _load_outlier_shas():
 
 _PYTHON_BIN = os.environ.get("OPENEVOLVE_PYTHON_BIN")
 
+# Raw per-problem results cache (small profile). {(program_path, stage): [recs]}
+_SMALL_RESULTS_CACHE: dict = {}
+
 _KEY_STATS = ("num_branches", "num_conflicts", "num_booleans",
               "wall_time", "user_time", "deterministic_time")
 _DECISIVE = ("OPTIMAL", "FEASIBLE")
@@ -103,6 +112,64 @@ def _load_program(path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _solve_repeats():
+    """How many times to run each solve before averaging. small profile → 10
+    (damps multi-worker variance), large → 1. OPENEVOLVE_SOLVE_REPEATS env
+    overrides."""
+    env = os.environ.get("OPENEVOLVE_SOLVE_REPEATS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    return N_REPEATS_SMALL if _profile() == "small" else 1
+
+
+def _average_runs(runs):
+    """Collapse N run_cpsat dicts into one with mean elapsed_ms / stats /
+    objective. Repeated runs of the same params are near-identical except for
+    multi-worker timing jitter, so the mean is the stable estimate. A run that
+    surfaced invalid_param short-circuits (config error, not a timing sample).
+    result = modal label; timeout = any run timed out."""
+    import collections
+    import statistics
+
+    if not runs:
+        return {"result": "Unknown", "elapsed_ms": 0, "stats": {}}
+    for r in runs:
+        if "invalid_param" in r:
+            return r
+    if len(runs) == 1:
+        return runs[0]
+
+    results = [r.get("result") for r in runs]
+    result = collections.Counter(results).most_common(1)[0][0]
+    elapsed = statistics.mean(r.get("elapsed_ms", 0) for r in runs)
+    timeout_any = any(r.get("timeout") for r in runs)
+
+    stat_keys = set()
+    for r in runs:
+        stat_keys |= set((r.get("stats") or {}).keys())
+    stats = {}
+    for k in stat_keys:
+        vals = [(r.get("stats") or {}).get(k) for r in runs]
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        if vals:
+            stats[k] = statistics.mean(vals)
+
+    out = {
+        "result": result,
+        "elapsed_ms": int(elapsed),
+        "timeout": timeout_any,
+        "stats": stats,
+        "n_repeats": len(runs),
+    }
+    objs = [r.get("objective") for r in runs if r.get("objective") is not None]
+    if objs:
+        out["objective"] = statistics.mean(objs)
+    return out
 
 
 def _pick_local_baseline(lo_entry, workers):
@@ -180,13 +247,6 @@ def _filter_stage2(problems):
     if not _STAGE2_SAMPLE.exists():
         return problems
     keep = set(json.loads(_STAGE2_SAMPLE.read_text())["sha256"])
-    return [p for p in problems if p["sha"] in keep]
-
-
-def _filter_stage3(problems):
-    if not _STAGE3_SAMPLE.exists():
-        return problems
-    keep = set(json.loads(_STAGE3_SAMPLE.read_text())["sha256"])
     return [p for p in problems if p["sha"] in keep]
 
 
@@ -360,6 +420,8 @@ def _evaluate(program_path, problems, stage_name):
     for _b in _blocks:
         _core_pool.put(_b)
 
+    repeats = _solve_repeats()
+
     def _solve(idx_p):
         idx, p = idx_p
         input_path = _RAW_DIR / p["input_file"]
@@ -388,20 +450,17 @@ def _evaluate(program_path, problems, stage_name):
                 )
         core = _core_pool.get()
         try:
-            r = run_cpsat(input_path, per_params, timeout_s,
-                          python_bin=_PYTHON_BIN, cpu_core=core)
+            runs = []
+            for _ in range(repeats):
+                rr = run_cpsat(input_path, per_params, timeout_s,
+                               python_bin=_PYTHON_BIN, cpu_core=core)
+                runs.append(rr)
+                if "invalid_param" in rr:
+                    break  # config error — no point repeating
+            r = _average_runs(runs)
         finally:
             _core_pool.put(core)
         return idx, p, r, core, timeout_s
-
-    def _is_regression(p, r):
-        # cost mode: baseline OPTIMAL → variant must reach OPTIMAL or FEASIBLE.
-        # bailing to UNKNOWN/INFEASIBLE/MODEL_INVALID on an OPTIMAL baseline = regression.
-        if "invalid_param" in r:
-            return False
-        if p["baseline_result"] not in _DECISIVE:
-            return False
-        return r.get("result") not in _DECISIVE
 
     def _invalid_err(r):
         return _err_result(
@@ -409,24 +468,6 @@ def _evaluate(program_path, problems, stage_name):
             {"invalid_param": r["invalid_param"], "stderr": r.get("stderr", "")[:2000],
              "stage": stage_name,
              "suggestion": "Remove or fix this key in get_params()."},
-        )
-
-    def _regression_err(p, r):
-        return _err_result(
-            {"error": f"result regression on {p['sha'][:10]}: "
-                      f"baseline={p['baseline_result']} got={r.get('result')}"},
-            {
-                "result_mismatch": {
-                    "sha": p["sha"][:12],
-                    "baseline_result": p["baseline_result"],
-                    "got_result": r.get("result"),
-                    "elapsed_ms": r.get("elapsed_ms"),
-                    "timeout": bool(r.get("timeout")),
-                },
-                "stage": stage_name,
-                "suggestion": "Variant lost feasibility on a problem baseline reached optimal. "
-                              "Revert params that disable a needed subsolver or shorten search.",
-            },
         )
 
     def _fmt_core(c):
@@ -437,8 +478,14 @@ def _evaluate(program_path, problems, stage_name):
         return str(c)
 
     print(f"  [{stage_name}] workers/solve={workers_per_solve} "
+          f"repeats={repeats} "
           f"core_blocks={[_fmt_core(b) for b in _blocks]}", flush=True)
 
+    # Non-feasible variants are NO LONGER aborted/zeroed — the variant's real
+    # measured time (≈ timeout when it ran the full budget) flows into the
+    # score, so a regression is penalized by its true slowdown + solved_rate
+    # drop, not by a 1e-6 sentinel. Only invalid_param (a config error, not a
+    # timing sample) still aborts the whole evaluation.
     by_idx = {}
     abort = None
     if n_parallel == 1:
@@ -449,10 +496,6 @@ def _evaluate(program_path, problems, stage_name):
                   f"(core={_fmt_core(core)})", flush=True)
             if "invalid_param" in r:
                 return _invalid_err(r)
-            if _is_regression(p, r):
-                print(f"  [{stage_name}] regression — aborting remaining "
-                      f"{len(problems) - idx - 1}", flush=True)
-                return _regression_err(p, r)
             by_idx[idx] = (p, r)
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -468,10 +511,7 @@ def _evaluate(program_path, problems, stage_name):
                       f"(core={_fmt_core(core)})", flush=True)
                 if "invalid_param" in r:
                     abort = ("invalid", p, r)
-                elif _is_regression(p, r):
-                    abort = ("regression", p, r)
-                if abort is not None:
-                    print(f"  [{stage_name}] {abort[0]} — cancelling pending "
+                    print(f"  [{stage_name}] invalid_param — cancelling pending "
                           f"(in-flight workers will drain)", flush=True)
                     for f in futures:
                         f.cancel()
@@ -479,7 +519,7 @@ def _evaluate(program_path, problems, stage_name):
                 by_idx[idx] = (p, r)
         if abort is not None:
             kind, p, r = abort
-            return _invalid_err(r) if kind == "invalid" else _regression_err(p, r)
+            return _invalid_err(r)
 
     results = []
     for idx in range(len(problems)):
@@ -494,6 +534,11 @@ def _evaluate(program_path, problems, stage_name):
         if "objective" in r:
             rec["objective"] = r["objective"]
         results.append(rec)
+
+    # Cache raw per-problem results so the small cascade can merge stage1 +
+    # stage2 into one combined final score (see evaluate_stage3). Keyed by
+    # program_path + stage; overwritten each cascade so no stale leakage.
+    _SMALL_RESULTS_CACHE[(str(program_path), stage_name)] = results
 
     metrics = score(results)
     metrics["stage"] = stage_name
@@ -617,42 +662,53 @@ def evaluate_stage2(program_path):
     return _evaluate(program_path, _filter_stage2(_load_problems(w)), "stage2")
 
 
+def _finalize_small(program_path):
+    """Small-profile final cascade slot. The cascade runs stage1 then stage2;
+    this merges their cached per-problem results into ONE combined score over
+    stage1 ∪ stage2. No stage3 (outliers live in the large profile) and no
+    stage4. Falls back to re-running a stage if its cache entry is absent."""
+    key = str(program_path)
+    r1 = _SMALL_RESULTS_CACHE.get((key, "stage1"))
+    if r1 is None:
+        res = evaluate_stage1(program_path)
+        if not isinstance(res, EvaluationResult):
+            return res
+        r1 = _SMALL_RESULTS_CACHE.get((key, "stage1"), [])
+    r2 = _SMALL_RESULTS_CACHE.get((key, "stage2"))
+    if r2 is None:
+        res = evaluate_stage2(program_path)
+        if not isinstance(res, EvaluationResult):
+            return res
+        r2 = _SMALL_RESULTS_CACHE.get((key, "stage2"), [])
+
+    combined = list(r1) + list(r2)
+    if not combined:
+        return _evaluate(program_path, [], "small_final")  # empty pass-through
+
+    metrics = score(combined)
+    metrics["stage"] = "small_final"
+    for k in _KEY_STATS:
+        metrics[f"total_{k}"] = float(sum(r["stats"].get(k, 0) for r in combined))
+    artifacts = {
+        "stage": "small_final",
+        "summary": (
+            f"combined stage1+stage2 ({len(combined)} problems) "
+            f"solved={metrics['solved']}/{metrics['total']} "
+            f"regressions={metrics['regressions']} "
+            f"geomean_dtime={metrics['geomean_speedup']:.3f} "
+            f"score={metrics['combined_score']:.3f}"
+        ),
+    }
+    return EvaluationResult(metrics=metrics, artifacts=artifacts)
+
+
 def evaluate_stage3(program_path):
     if _profile() == "large":
         return _evaluate_large(program_path)
-    # openevolve cascade hardcodes 3 stages, so user-stage4 (broad runtime
-    # sample) is chained inside stage3 via the runtime cascade_threshold gate.
-    #
-    # Phase1/2 (W=1) policy: SKIP stage3 entirely. Stage3 holds outlier
-    # problems whose baseline is W=8-equivalent (raw-data was recorded with
-    # workers=8); running them at W=1 takes ≥10× longer with no signal —
-    # phase1/2 tune knobs that are irrelevant at W=1 anyway (subsolver mix,
-    # cuts). For W=1 phases, skip stage3 and go straight to stage4 as the
-    # final cascade step.
-    w = _peek_workers(program_path)
-    if w == 1:
-        problems4 = _filter_stage4(_load_problems(w))
-        r4 = _evaluate(program_path, problems4, "stage4")
-        if isinstance(r4, EvaluationResult):
-            r4.artifacts["stage3_policy"] = (
-                "skipped: phase has num_search_workers=1 — outlier stage3 "
-                "is W=8-only (see evaluator.evaluate_stage3 docstring)")
-        return r4
-
-    problems3 = _filter_stage3(_load_problems(w))
-    r3 = _evaluate(program_path, problems3, "stage3")
-    if not isinstance(r3, EvaluationResult):
-        return r3
-    gate = cascade_threshold(2, default=1.03)
-    if r3.metrics.get("combined_score", 0.0) < gate:
-        return r3
-    problems4 = _filter_stage4(_load_problems(w))
-    r4 = _evaluate(program_path, problems4, "stage4")
-    if not isinstance(r4, EvaluationResult):
-        return r4
-    merged_metrics = {**r3.metrics, **r4.metrics}
-    merged_artifacts = {**r3.artifacts, **r4.artifacts}
-    return EvaluationResult(metrics=merged_metrics, artifacts=merged_artifacts)
+    # small profile: cascade is stage1 → stage2 only. This final slot merges
+    # cached stage1 + stage2 results into one combined score. stage3 (outliers)
+    # and stage4 (broad spread) are no longer part of the small cascade.
+    return _finalize_small(program_path)
 
 
 def evaluate_stage4(program_path):
