@@ -918,7 +918,7 @@ GLOBAL_OVERRIDES = {...}
         <tr><td>Random seed / Island</td><td>42 / 3개</td></tr>
         <tr><td>phase당 iteration</td><td>40</td></tr>
         <tr><td>LOCKED 파라미터</td><td><code>random_seed=0</code>, <code>num_search_workers</code>=1 (phase1/2), 8 (phase3)</td></tr>
-        <tr><td>Cascade 평가</td><td>stage1(10) → stage2(10) → [stage3 outlier] → stage4(20)</td></tr>
+        <tr><td>Cascade 평가</td><td>stage1(10) → stage2(10) → [stage3 outlier] → stage4(64문제 · 53 비교가능)</td></tr>
         <tr><td>Phase 체이닝</td><td>phaseN best → phase(N+1) <code>initial_program.py</code>로 상속</td></tr>
       </tbody>
     </table>
@@ -928,171 +928,157 @@ GLOBAL_OVERRIDES = {...}
 
 <!-- ========== Slide 21: Phase1 search/subsolvers ========== -->
 <section class="slide">
-  <div class="slide-head"><span class="chap">7.1 Phase1</span><h1>search / subsolvers — 큰 도약 (0.71 → 1.46)</h1></div>
+  <div class="slide-head"><span class="chap">7.1 Phase1</span><h1>search / subsolvers — LP·cuts로 +28.5%</h1></div>
   <div class="slide-body">
-    <p>Phase1은 가장 큰 표면(search 전략 + subsolver 조합)을 단독으로 탐색. 초기 config는 탐색이 무거워 <em>dtime은 느리지만</em> branch/conflict는 적다.</p>
+    <p>Phase1 표면은 search 전략 + subsolver 조합. 그런데 <code>num_search_workers=1</code>이라 subsolver portfolio가 무의미 — LLM이 thinking에서 이를 알아채고 <strong>LP 품질·cut·presolve</strong> 쪽으로 방향을 튼다.</p>
 
-<pre><code>initial: combined_score=0.7123  geomean_speedup=0.5436  efficiency=2.2518
-winner : combined_score=1.4582  geomean_speedup=1.1786  efficiency=1.8948  (solved 20/20)
-         🌟 new best @ iter 1, 4, 31</code></pre>
-
-    <p>winner가 채택한 핵심 — feasibility 휴리스틱:</p>
-<pre><code>GLOBAL_OVERRIDES = { "use_feasibility_pump": True }   # 작은/중간 문제 dtime 단축
-SIZE_BUCKETS[large] = { "use_feasibility_jump": True, "use_feasibility_pump": True }
-STAGE3_OVERRIDES = { "repair_hint": True, "hint_conflict_limit": 50 }</code></pre>
+<pre><code>initial: combined_score=0.9117  geomean_speedup=1.2532  solved_rate=0.8529  regressions=5
+winner : combined_score=1.3086  geomean_speedup=1.2851  solved_rate=0.9811  regressions=1
+         efficiency=1.1840   🌟 new best @ iter 1, 9, 12, 33, 36, 39</code></pre>
 
     <div class="callout ok">
-      <strong>결과.</strong> deterministic_time <strong>17.9% 단축</strong> (geomean_speedup 1.1786), 20/20 OPTIMAL. 큰 탐색 공간 → 큰 점프. <span style="opacity:.8">(LLM 생성 timeout 10회 — claude_code 3-retry 후 skip)</span>
+      <strong>결과.</strong> deterministic_time <strong>28.5% 단축</strong> (geomean_speedup 1.2851), regression 5→1로 감소, solved_rate 0.85→0.98. 큰 표면을 6번의 new-best로 점진 정복. <span style="opacity:.8">(LLM 생성 timeout 7회 — claude_code 3-retry 후 skip)</span>
     </div>
-    <p class="tag">주의: winner가 켠 <code>use_feasibility_jump/pump</code>가 phase2로 상속되며 문제를 일으킨다 →</p>
   </div>
   <div class="slide-foot"><span>7.1 Phase1</span><div class="progress"><div class="progress-fill"></div></div><span>21 / 35</span></div>
 </section>
 
-<!-- ========== Slide 22: Phase2 broken inheritance ========== -->
+<!-- ========== Slide 22: Phase1 layered config ========== -->
 <section class="slide">
-  <div class="slide-head"><span class="chap">7.2 Phase2 시작</span><h1>상속이 깨졌다 — score 0.0000</h1></div>
+  <div class="slide-head"><span class="chap">7.1 Phase1 config</span><h1>문제 크기별로 정반대 — layered tuning</h1></div>
   <div class="slide-body">
-    <p>Phase2(presolve/probing)는 phase1 winner를 상속. 그런데 초기 평가가 <strong>0점</strong>. phase1에서 켠 <code>use_feasibility_jump=True</code>가 W=1 단독 실행 시 한 문제에서 feasibility를 잃었다.</p>
+    <p>winner는 글로벌로 LP를 강하게 깔고, SIZE_BUCKETS로 크기별 정반대 강도를 적용:</p>
+<pre><code>GLOBAL: linearization_level=2, cut_level=2, max_num_cuts=10000,
+        add_mir_cuts + add_zero_half_cuts + add_clique_cuts + add_objective_cut,
+        probing_num_combinations_limit=40000, root_lp_iterations=2500
 
-<pre><code>initial c69923ed: combined_score=0.0000  solved_rate=0.0000
-artifact.result_mismatch = {
-    "sha": "b5e191a8...", "baseline_result": "OPTIMAL", "got_result": "UNKNOWN"
-}
-artifact.suggestion = "Variant lost feasibility on a problem baseline reached
-    optimal. Revert params that disable a needed subsolver or shorten search."</code></pre>
-
-    <div class="callout danger">
-      <strong>체이닝의 양날.</strong> phase 체이닝은 이득뿐 아니라 regression도 전달한다. 단 하나의 OPTIMAL→UNKNOWN이 <code>solved_rate=0</code>을 만들어 combined_score를 0으로 떨군다 (score 식의 <code>solved_rate²</code> 항).
-    </div>
-    <p class="tag">하지만 evaluator가 돌려준 <code>result_mismatch</code> + <code>suggestion</code> artifact가 다음 iteration들의 단서가 된다.</p>
-  </div>
-  <div class="slide-foot"><span>7.2 Phase2 시작</span><div class="progress"><div class="progress-fill"></div></div><span>22 / 35</span></div>
-</section>
-
-<!-- ========== Slide 23: Phase2 recovery curve ========== -->
-<section class="slide">
-  <div class="slide-head"><span class="chap">7.3 Phase2 회복</span><h1>안전하지만 느린 회복</h1></div>
-  <div class="slide-body">
-    <p>이후 iteration들은 "일단 다 풀리게" 만드는 보수적 변형으로 점진 회복. solved 10/10이지만 dtime은 baseline보다 느림(speedup &lt; 1).</p>
-
-<pre><code>iter 1 (4a07c113): combined_score=0.8807  geomean_speedup=0.881   solved 10/10
-iter 3 (2fa91fef): combined_score=0.9771  geomean_speedup=0.901
-iter 9 (5e2691fb): combined_score=0.9905  geomean_speedup=0.946</code></pre>
+SIZE_BUCKETS[small &lt;50k]: LP 가볍게 — probing1, linearization1, root_lp=500
+                          (probing3은 conflict 3배 폭발 → 회피)
+SIZE_BUCKETS[large ≥150k]: LP 무겁게 — linearization2, root_lp=4000
+                          (root_lp 6000은 UNKNOWN 유발 → 4000이 안전선)</code></pre>
 
     <div class="callout">
-      <strong>국소 최적의 함정.</strong> regression은 사라졌지만(solved 10/10) 모두 <code>geomean_speedup &lt; 1.0</code> — baseline보다 dtime을 더 쓴다. LLM은 "안전한 0.9x"에 머물러 0점은 피했지만 phase1 수준(1.18)엔 못 미침. stage1 gate를 못 넘어 stage2로도 못 간다.
+      <strong>핵심.</strong> 작은 SAT-유사 문제엔 LP가 독, 큰 LP-heavy 문제엔 약. 같은 knob을 크기별로 반대로 돌린다. config 주석에 "왜 안 되는지"(<code>conflict 3배</code>, <code>UNKNOWN</code>)까지 LLM이 적어둠 — artifact 피드백으로 학습한 흔적.
     </div>
   </div>
-  <div class="slide-foot"><span>7.3 Phase2 회복</span><div class="progress"><div class="progress-fill"></div></div><span>23 / 35</span></div>
+  <div class="slide-foot"><span>7.1 Phase1 config</span><div class="progress"><div class="progress-fill"></div></div><span>22 / 35</span></div>
 </section>
 
-<!-- ========== Slide 24: Phase2 breakthrough iter23 ========== -->
+<!-- ========== Slide 23: Phase2 clean inherit + single jump ========== -->
 <section class="slide">
-  <div class="slide-head"><span class="chap">7.4 Phase2 돌파</span><h1>iter 23 — 근본 원인 진단으로 돌파</h1></div>
+  <div class="slide-head"><span class="chap">7.2 Phase2</span><h1>presolve — 깨끗한 상속, 단일 도약 (+51.7%)</h1></div>
   <div class="slide-body">
-    <p>iter 23에서 LLM이 thinking 로그에 root cause를 적고 직접 고친다:</p>
-    <div class="callout">
-      <em>"Phase1 winner가 <code>use_feasibility_jump=True</code>를 켠 듯. W=1에서는 이게 유일 solver로 돌아 LP-heavy 문제에서 optimality 증명 없이 FEASIBLE로 끝난다. 두 early-exit 휴리스틱을 명시적으로 끈다."</em>
-    </div>
-<pre><code>GLOBAL_OVERRIDES = {
-    "cp_model_probing_level": 2, "symmetry_level": 1,
-    "use_feasibility_jump": False,   # ← root-cause fix
-    "use_feasibility_pump": False,
-    "stop_after_first_solution": False, "use_lns_only": False,
-}
-# SIZE_BUCKETS: small=probing2+MIR/zero-half cuts, mid=probing2+cut1, large=probing1+lin1</code></pre>
+    <p>Phase2(presolve/probing)는 phase1 winner를 상속. 이번엔 시작부터 깨끗 — 53/53 solved, regression 0.</p>
+
+<pre><code>initial 3e428b82: combined_score=1.3288  geomean_speedup=1.2906  solved 53/53
+winner          : combined_score=1.4713  geomean_speedup=1.5172  efficiency=0.9119
+         🌟 new best @ iter 10  (같은 config 계열이 iter 13·15·25·31·34 재등장)</code></pre>
 
     <div class="callout ok">
-      <strong>돌파.</strong> stage1 gate 통과 → 전체 cascade(stage4, 20문제) 진입. <code>combined_score=1.4582, geomean_speedup=1.1786 (+17.9%)</code>. phase1과 동일 수준을 <em>더 안전한 config</em>로 회복 — 체이닝이 만든 regression을 진단·복구한 것.
+      <strong>단일 결정적 도약.</strong> 40 iter 중 대부분은 ~0.99(이득 없음)를 맴돌다 iter 10에서 한 번에 <code>1.4713</code>로 점프. deterministic_time <strong>51.7% 단축</strong> (geomean 1.2906 → 1.5172). 이 winning config가 이후 5번 더 재발견됨 — robust한 optimum.
     </div>
   </div>
-  <div class="slide-foot"><span>7.4 Phase2 돌파</span><div class="progress"><div class="progress-fill"></div></div><span>24 / 35</span></div>
+  <div class="slide-foot"><span>7.2 Phase2</span><div class="progress"><div class="progress-fill"></div></div><span>23 / 35</span></div>
 </section>
 
-<!-- ========== Slide 25: Phase2 failures along the way ========== -->
+<!-- ========== Slide 24: Phase2 "less is more" ========== -->
 <section class="slide">
-  <div class="slide-head"><span class="chap">7.5 Phase2 실패</span><h1>돌파 전후의 실패들</h1></div>
+  <div class="slide-head"><span class="chap">7.3 Phase2 통찰</span><h1>더하기가 아니라 덜어내기</h1></div>
   <div class="slide-body">
-    <p>좁은 변형 공간에서 한 발만 잘못 디뎌도 OPTIMAL→UNKNOWN. 돌파 이후에도 다른 가지에서 같은 종류의 regression이 반복.</p>
-
-<pre><code>iter 25, 32: combined_score=0.0000
-             error="result regression on dd4063e9bc: baseline=OPTIMAL got=UNKNOWN"
-LLM 생성 timeout: iter 5,10,12,18,19,22,30,35  (claude_code 3-retry 후 skip)</code></pre>
-
-    <div class="callout danger">
-      <strong>왜 0점이 자꾸 나오나.</strong> presolve/probing 표면은 이미 잘 도는 baseline 위라 변형 여지가 좁다. 그래도 MAP-Elites + island가 0점 가지를 버리고, artifact의 <code>result_mismatch</code>가 LLM을 안전 영역으로 끌어와 iter 23 돌파를 가능케 했다.
-    </div>
-  </div>
-  <div class="slide-foot"><span>7.5 Phase2 실패</span><div class="progress"><div class="progress-fill"></div></div><span>25 / 35</span></div>
-</section>
-
-<!-- ========== Slide 26: Phase3 lp/cuts flat ========== -->
-<section class="slide">
-  <div class="slide-head"><span class="chap">7.6 Phase3</span><h1>lp / cuts (W=8) — 평탄한 표면</h1></div>
-  <div class="slide-body">
-    <p>Phase3는 phase1+2 winner를 상속하고 8-worker로 LP/cuts 표면을 튠. 시작부터 이미 baseline 수준 (상속 config가 강함).</p>
-
-<pre><code>initial c2e091f9: combined_score=0.9930  geomean_speedup=0.9930  (solved 10/10, W=8)
-winner  620d4019: combined_score=1.0225  geomean_speedup=0.9778  efficiency=1.1437
-         🌟 new best @ iter 3, 27</code></pre>
-
-    <p>winner config (요약):</p>
-<pre><code>GLOBAL: max_num_cuts=6000, root_lp_iterations=3500, symmetry_level=3,
-        interleave_search=True, share_glue_clauses=True, solution_pool_size=8
-SIZE_BUCKETS[small]: probing3 + linearization2 + cut_level2
-SIZE_BUCKETS[large]: root_lp_iterations=5000 + MIR/zero-half cuts</code></pre>
+    <p>winning config는 phase1보다 <strong>더 단순</strong>하다. presolve 작업을 덜어내서 빨라졌다:</p>
+<pre><code>GLOBAL_OVERRIDES = {
+    "cp_model_probing_level": 1,
+    "symmetry_level": 1,        # default 2 → symmetry 탐지 작업 감소
+    "presolve_use_bva": False,  # default True → BVA presolve 비용 제거
+}
+SIZE_BUCKETS[small &lt;50k] = { "cp_model_probing_level": 0 }   # probing 완전 off
+STAGE3_OVERRIDES = {}</code></pre>
 
     <div class="callout">
-      <strong>관찰.</strong> 8개 워커 portfolio에 무거운 LP/cuts를 더해도 <code>geomean_speedup=0.9778</code> — dtime은 오히려 <strong>2.2% 느려짐</strong>.
+      <strong>방향이 표면마다 반대.</strong> phase1은 LP/cuts를 <em>추가</em>해 이득. phase2는 presolve overhead를 <em>제거</em>해 이득. 이 sample에선 presolve 작업의 비용 &gt; 이득. "무엇을 켤까"만큼 "무엇을 끌까"가 중요 — LLM이 양방향 모두 탐색.
     </div>
   </div>
-  <div class="slide-foot"><span>7.6 Phase3</span><div class="progress"><div class="progress-fill"></div></div><span>26 / 35</span></div>
+  <div class="slide-foot"><span>7.3 Phase2 통찰</span><div class="progress"><div class="progress-fill"></div></div><span>24 / 35</span></div>
 </section>
 
-<!-- ========== Slide 27: Phase3 score interpretation ========== -->
+<!-- ========== Slide 25: Phase2 score decomposition ========== -->
 <section class="slide">
-  <div class="slide-head"><span class="chap">7.7 Phase3 해석</span><h1>score &gt; 1 인데 왜 dtime은 느린가</h1></div>
+  <div class="slide-head"><span class="chap">7.4 score 분해</span><h1>efficiency 희생, speed 취득</h1></div>
   <div class="slide-body">
-    <p>winner의 combined_score 1.0225는 <strong>speedup가 아니라 efficiency factor</strong>가 끌어올린 값:</p>
+    <p>winner는 efficiency가 <strong>나빠졌는데도</strong>(1.09 → 0.91) 점수는 올랐다. branch/conflict는 늘었지만 dtime이 크게 줄었기 때문:</p>
 
 <pre><code>combined_score = geomean_speedup × efficiency^STATS_WEIGHT × solved_rate²
-              ≈   0.9778        × 1.1437^0.333
-              ≈   0.9778        × 1.046              ≈ 1.0225</code></pre>
+              ≈   1.5172        × 0.9119^0.333        × 1.0²
+              ≈   1.5172        × 0.969                       ≈ 1.4713</code></pre>
 
-    <p>즉 dtime(0.978)은 baseline보다 느린데, branch/conflict가 줄어든 efficiency(1.14)가 점수를 1 위로 들어올린 것.</p>
+    <div class="callout ok">
+      <strong>트레이드오프를 점수로 학습.</strong> geomean_speedup 이득(+51.7%)이 efficiency 손해(−9%)를 압도. score 식이 "덜 효율적이어도 더 빠르면 보상" 구조라, LLM은 presolve를 줄여 일을 더 시키는 대신(branch↑) 벽시계를 단축하는 변형을 자율 선택. <span style="opacity:.8">(wall_speedup도 1.62→1.88로 동반 상승)</span>
+    </div>
+  </div>
+  <div class="slide-foot"><span>7.4 score 분해</span><div class="progress"><div class="progress-fill"></div></div><span>25 / 35</span></div>
+</section>
 
-    <div class="callout danger">
-      <strong>한계 효용(diminishing returns).</strong> 쉬운 이득은 phase1/2가 이미 가져갔다. LP/cuts 표면은 이 시점에 거의 평탄 — 점수 1.02는 "실질 속도 개선"이 아니다. score 숫자를 해석할 때 어떤 항이 들어올렸는지 봐야 함.
+<!-- ========== Slide 26: Phase3 lp/cuts incremental gain ========== -->
+<section class="slide">
+  <div class="slide-head"><span class="chap">7.5 Phase3</span><h1>lp / cuts (W=8) — +11.5% 추가</h1></div>
+  <div class="slide-body">
+    <p>Phase3는 phase1+2 winner를 상속하고 8-worker로 LP/cuts 표면을 튠. 이미 강한 상속 config 위에서도 추가 이득.</p>
+
+<pre><code>initial 3961c65d: combined_score=1.0095  geomean_speedup=1.0073  solved 19/19 (stage1)
+best @ iter 26  : combined_score=1.1470  geomean_speedup=1.1146  efficiency=1.0900
+         🌟 new best @ iter 11 → 17 → 26  (solved 53/53, stage4)</code></pre>
+
+    <p>iter 26 config (요약):</p>
+<pre><code>GLOBAL: max_num_cuts=3000, cut_level=1, add_objective_cut=True, root_lp_iterations=3000,
+        mip_max_bound=1e7 (+ mip_var_scaling / check_precision / drop_tolerance)
+STAGE3_OVERRIDES: use_feasibility_jump=True</code></pre>
+
+    <div class="callout">
+      <strong>관찰.</strong> 8-worker portfolio 위에서도 deterministic_time <strong>11.5% 추가 단축</strong>. <span style="opacity:.8">(이 run은 iter 27에서 중단 — best 추출 전 best-so-far 기준)</span>
+    </div>
+  </div>
+  <div class="slide-foot"><span>7.5 Phase3</span><div class="progress"><div class="progress-fill"></div></div><span>26 / 35</span></div>
+</section>
+
+<!-- ========== Slide 27: Phase3 artifact safety net ========== -->
+<section class="slide">
+  <div class="slide-head"><span class="chap">7.6 Phase3 안전장치</span><h1>"빠르지만 틀린" 변형을 artifact로 거부</h1></div>
+  <div class="slide-body">
+    <p>iter 27에서 LLM이 <code>num_violation_ls=1</code>을 시도. dtime이 극적으로 줄지만 결과가 틀린다 — thinking 로그:</p>
+    <div class="callout">
+      <em>"<code>num_violation_ls=1</code> 변형이 deterministic time을 14.3 → 7.66초로 극적으로 낮추지만 OPTIMAL 대신 <strong>UNKNOWN</strong>을 반환 — red flag. solver가 해를 찾기 전에 조기 종료. 너무 공격적이다. baseline으로 되돌리고 검증된 <code>add_objective_cut: True</code>를 유지한다."</em>
     </div>
 
-    <p class="tag" style="text-align:center;">artifact 피드백 + 분해 가능한 score = 점수만 봤을 때 놓칠 인과를 드러냄.</p>
+    <div class="callout ok">
+      <strong>핵심.</strong> 점수(dtime)만 봤다면 "2배 빠른" 이 변형을 채택했을 것. 하지만 artifact의 <code>OPTIMAL→UNKNOWN</code> 신호로 LLM이 스스로 거부하고 안전한 config로 회귀. <em>속도와 정확성의 트레이드오프를 인과적으로 판단</em> — 점수만으로는 불가능한 디버깅.
+    </div>
   </div>
-  <div class="slide-foot"><span>7.7 Phase3 해석</span><div class="progress"><div class="progress-fill"></div></div><span>27 / 35</span></div>
+  <div class="slide-foot"><span>7.6 Phase3 안전장치</span><div class="progress"><div class="progress-fill"></div></div><span>27 / 35</span></div>
 </section>
 
 <!-- ========== Slide 28: 3-phase summary ========== -->
 <section class="slide">
-  <div class="slide-head"><span class="chap">7.8 종합</span><h1>3-Phase가 보여준 동작 양상</h1></div>
+  <div class="slide-head"><span class="chap">7.7 종합</span><h1>3-Phase가 보여준 동작 양상</h1></div>
   <div class="slide-body">
     <table>
-      <thead><tr><th>Phase</th><th>표면 / W</th><th>initial</th><th>winner</th><th>geomean_speedup</th><th>양상</th></tr></thead>
+      <thead><tr><th>Phase</th><th>표면 / W</th><th>initial</th><th>winner</th><th>geomean_speedup (dtime)</th><th>양상</th></tr></thead>
       <tbody>
-        <tr><td>1</td><td>search/subsolvers · W1</td><td>0.7123</td><td><strong>1.4582</strong></td><td>1.1786 (+17.9%)</td><td>탐색 — 큰 도약</td></tr>
-        <tr><td>2</td><td>presolve/probing · W1</td><td>0.0000</td><td><strong>1.4582</strong></td><td>1.1786</td><td>진단·복구 — root-cause fix</td></tr>
-        <tr><td>3</td><td>lp/cuts · W8</td><td>0.9930</td><td>1.0225</td><td>0.9778 (−2.2%)</td><td>평탄 — 한계 효용</td></tr>
+        <tr><td>1</td><td>search/subsolvers · W1</td><td>0.9117</td><td><strong>1.3086</strong></td><td>1.2851 (+28.5%)</td><td>LP·cuts 추가, regression↓</td></tr>
+        <tr><td>2</td><td>presolve/probing · W1</td><td>1.3288</td><td><strong>1.4713</strong></td><td>1.5172 (+51.7%)</td><td>presolve 덜어내기</td></tr>
+        <tr><td>3</td><td>lp/cuts · W8</td><td>1.0095</td><td>1.1470*</td><td>1.1146 (+11.5%)</td><td>추가 cut 미세 이득</td></tr>
       </tbody>
     </table>
+    <p class="tag" style="margin-top:4px;">*phase3는 iter 27 중단 시점 best-so-far. phase1/2는 직전 phase best 위에서 측정.</p>
 
-    <div class="callout ok" style="margin-top:10px;">
+    <div class="callout ok" style="margin-top:8px;">
       <ol style="margin:0; padding-left:20px;">
-        <li><strong>체이닝은 이득과 regression을 함께 전달.</strong> phase2 시작 0점은 phase1이 켠 휴리스틱 탓 — artifact가 LLM의 root-cause 진단을 가능케 함.</li>
-        <li><strong>score 식 해석 주의.</strong> phase3는 dtime&lt;1인데 efficiency factor가 score를 1 위로 들어올림.</li>
-        <li><strong>모든 phase가 이득을 내진 않는다.</strong> phase3는 평탄 — cascade가 "어디서 멈출지"를 보여줌.</li>
+        <li><strong>체이닝은 이득을 누적.</strong> 각 phase가 직전 best 위에서 추가로 짜냄 — phase1 LP/cuts → phase2 presolve → phase3 cut 미세조정.</li>
+        <li><strong>최적 방향이 표면마다 다르다.</strong> phase1은 LP/cuts를 <em>추가</em>, phase2는 presolve를 <em>제거</em>해 이득. LLM이 양방향 모두 탐색.</li>
+        <li><strong>artifact가 안전을 보장.</strong> "빠르지만 UNKNOWN"인 변형을 점수가 아닌 결과 신호로 거부 (phase3 num_violation_ls).</li>
       </ol>
     </div>
   </div>
-  <div class="slide-foot"><span>7.8 종합</span><div class="progress"><div class="progress-fill"></div></div><span>28 / 35</span></div>
+  <div class="slide-foot"><span>7.7 종합</span><div class="progress"><div class="progress-fill"></div></div><span>28 / 35</span></div>
 </section>
 
 <!-- ========== Slide 29: Bench dir structure ========== -->
