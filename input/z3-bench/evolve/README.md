@@ -1,284 +1,143 @@
-# Z3 Parameter Tuning via OpenEvolve — 실행 & 구조
+# z3-bench — Z3 SMT 솔버 파라미터 튜닝
 
-OpenEvolve를 사용해 Z3 SMT 솔버의 파라미터를 진화적으로 탐색한다. 입력은 `input/z3-bench/` 데이터셋(50개 SMT2 인스턴스 + baseline 실행 로그). 목표는 baseline 대비 wall-clock 시간 단축, 단 정답(Sat/Unsat) 보존.
+Z3 SMT 솔버 (v4.13.x) 파라미터를 진화적 탐색으로 튜닝. 데이터셋:
+`input/z3-bench/raw-data/` (50개 SMT2 인스턴스, ~13k Int / 19k Bool / 40 Real
+변수, ~2k soft + 105k hard 제약). 목표: baseline 대비 wall-clock 시간 단축,
+정답성 (Sat/Unsat) 보존.
 
-> OpenEvolve 소개, 본 프로젝트의 목적/접근, 스코어링 공식, 설계 결정, 로드맵은 [OPENEVOLVE_INTRO.md](OPENEVOLVE_INTRO.md) 참고.
+플랫폼 전반 구조는 [`input/README.md`](../../README.md), OpenEvolve 개념은
+[`OPENEVOLVE_INTRO.md`](OPENEVOLVE_INTRO.md) 참고. 본 문서는 z3-bench 고유
+사항만 다룬다.
 
----
-
-## 1. 디렉토리 구조
+## 디렉토리 구조
 
 ```
 input/z3-bench/
-├── README.md                         # 데이터셋 스키마 설명
-├── problems.jsonl                    # baseline 실행 결과 50행
-├── problems.csv                      # 평탄화 버전
-├── raw-data/                         # 원본 SMT2 + meta jsonl
+├── raw-data/                          # <sha>.smt2 + meta.jsonl
+├── problems.jsonl                     # baseline 실행 기록 (50 rows)
 └── evolve/
-    ├── README.md                     # 이 파일 (실행 & 구조)
-    ├── OPENEVOLVE_INTRO.md           # 개념/목적/설계
-    ├── config.yaml                   # 공유 OpenEvolve config
-    ├── run_phase.sh                  # 1/2/3/4 phase 실행 진입점
-    ├── build_samples.py              # stage1/stage2 sample 생성
-    ├── extract_best.py               # phase N 종료 후 best 추출
-    ├── prepare_phase4.py             # phase4 EVOLVE-BLOCK 머터리얼라이즈
-    ├── rebaseline_local.py           # 로컬에서 baseline 재측정
-    ├── final_verify.py               # P4 best 전수 검증
-    ├── shared/
-    │   ├── baseline_params.py        # BASELINE 19키, LOCKED 4키
-    │   ├── score.py                  # geomean × solved_rate^2
-    │   ├── z3_runner.py              # subprocess z3 CLI 호출
-    │   ├── evaluator.py              # cascade stage1/stage2
-    │   ├── stage1_sample.json        # 5문제 stratified sample (seed=42)
-    │   ├── stage2_sample.json        # stage2 problem set
-    │   └── phase{1,2,3}_best.json    # 각 phase 종료 후 생성됨
-    ├── phase1_opt_sls/
-    │   └── initial_program.py        # EVOLVE-BLOCK: OPT_SLS_OVERRIDES (~34키)
-    ├── phase2_sat/
-    │   └── initial_program.py        # EVOLVE-BLOCK: SAT_OVERRIDES (~121키)
-    ├── phase3_smt/
-    │   └── initial_program.py        # EVOLVE-BLOCK: SMT_OVERRIDES (~97키)
-    └── phase4_unified/
-        └── initial_program.py        # EVOLVE-BLOCK: UNIFIED_OVERRIDES (union)
+    ├── config.yaml                    # bench / LLM / clustering / evaluation
+    ├── params.json                    # Z3 파라미터 카탈로그
+    ├── adapter.py                     # solver hooks
+    ├── _solve_worker.py               # z3 Python binding subprocess
+    ├── phase1_opt_sls/                # opt.* + sls.*
+    ├── phase2_sat/                    # sat.* (CDCL core)
+    ├── phase3_smt/                    # smt.* (theories, quantifier, arith)
+    ├── phase4_unified/                # 통합 refinement (자동 머터리얼)
+    └── cache/                         # 생성물, 삭제 안전
+        ├── stage{1..4}_sample.json
+        ├── local_baseline.json
+        └── phase{N}_best.json
 ```
 
-## 2. 평가 흐름 (cascade)
+## 평가 흐름
 
-```
-LLM 변이된 initial_program.py
-    ↓
-evaluator.py:
-    1. get_params() 호출 → dict
-    2. LOCKED 위반 체크 → 위반 시 0점 + locked_violated artifact
-    3. stage1 (5문제, per-problem 15s timeout):
-        for each problem in stage1_sample:
-            run_z3(smt2, params, timeout=15s)
-            invalid_param 감지 시 즉시 0점 + 어떤 키인지 artifact
-        score → cascade_threshold 0.3 통과 시 stage2 진입
-    4. stage2 (50문제, per-problem 120s timeout):
-        동일 방식, 전수
-    5. 최종 metrics + per_problem artifacts (상위 20개) 반환
-```
+`config.yaml` `bench.evaluation`:
 
-### Stage1 sample (stratified by baseline elapsed_ms, seed=42)
-
-```
-ac90ca97ff99      239 ms  Unsat   (fast)
-133383a624ef      480 ms  Unsat   (fast)
-29efe6d38d7b   12,712 ms  Unsat   (medium)
-86468fd861ff   15,671 ms  Sat     (medium)
-3854194b901b   66,100 ms  Sat     (slow)
-```
-
-5분위 버킷에서 하나씩 → Sat/Unsat + 빠름/느림 골고루.
-
-## 3. Initial program 표준 형태
-
-각 phase의 `initial_program.py`는 동일 패턴:
-
-```python
-import pathlib, sys
-_SHARED = pathlib.Path(__file__).resolve().parent.parent / "shared"
-sys.path.insert(0, str(_SHARED))
-
-from baseline_params import BASELINE
-
-# (phase 2-3-4는 이전 phase best.json 로드)
-import json
-_PHASE1 = json.loads((_SHARED / "phase1_best.json").read_text()) \
-    if (_SHARED / "phase1_best.json").exists() else {}
-
-# EVOLVE-BLOCK-START
-PHASE_OVERRIDES = {
-    "opt.priority": "pareto",
-    "opt.maxsat_engine": "wmax",
-    # ...
-}
-# EVOLVE-BLOCK-END
-
-def get_params():
-    p = dict(BASELINE)
-    p.update(_PHASE1)            # 누적 (phase 2+)
-    p.update(PHASE_OVERRIDES)    # 현재 phase
-    return p
-
-def get_phase_overrides():
-    """extract_best.py가 사용 — 현재 phase의 dict만 반환."""
-    return dict(PHASE_OVERRIDES)
-```
-
-evaluator는 phase를 모름 — `get_params()` 결과만 받음. `extract_best.py`는 `get_phase_overrides()`만 호출 → phase별 dict 분리 유지.
-
-## 4. 실행 절차 (Docker)
-
-### 4.1 백엔드 선택
-
-| 항목 | OpenAI 호환 (기본) | Claude Code |
-|---|---|---|
-| 인증 | env var `OPENAI_API_KEY` (Gemini/OpenAI/local 등) | env var `CLAUDE_CODE_OAUTH_TOKEN` (host에서 `claude setup-token`) |
-| config.yaml model | `provider` 없음 또는 `openai` | `provider: claude_code` |
-| Config 예시 | `configs/default_config.yaml` | `configs/claude_code_example.yaml` |
-| Rate limit | 키 발급사 정책 | Pro/Max 5h window — 빠르게 막힘 |
-| 재현성 | `temperature`/`seed` 적용 | SDK 미지원, 약함 |
-| Docker 자동 셋업 | skip 권장 (`AUTO_INSTALL_CLAUDE=0`) | docker-init-claude.sh가 자동 실행 |
-
-### 4.2 Quickstart — Claude Code 백엔드
-
-```bash
-# === Host에서 (1회만) ===
-claude setup-token                          # 출력 토큰 복사 (Keychain 우회용 long-lived OAuth)
-export CLAUDE_CODE_OAUTH_TOKEN="sk-..."     # ~/.zshrc 등 영구화 권장
-
-./docker-run.sh dev -s z3evo                # 진입 — 첫 실행: claude CLI + SDK 자동 설치 (수 분)
-                                            # 두 번째부터: 즉시 셸 (영속 mount로 skip)
-```
-
-```bash
-# === Container 안 (1회만) ===
-pip install -e ".[dev]"                     # OpenEvolve 본체
-apt-get install -y z3                       # 또는: pip install z3-solver
-
-python -c "from openevolve.llm.claude_code import ClaudeCodeLLM; print('ok')"  # sanity check
-
-# 데이터 sample (이미 생성됨; 재생성 원할 때만)
-python input/z3-bench/evolve/build_samples.py
-
-# Phase 순차 실행 — 각 phase 종료 시 extract_best.py 자동 호출
-./input/z3-bench/evolve/run_phase.sh 1
-./input/z3-bench/evolve/run_phase.sh 2
-./input/z3-bench/evolve/run_phase.sh 3
-./input/z3-bench/evolve/run_phase.sh 4
-```
-
-### 4.3 Quickstart — OpenAI 호환 백엔드
-
-```bash
-# === Host에서 ===
-export OPENAI_API_KEY="..."                 # config.yaml의 api_base에 맞는 키
-AUTO_INSTALL_CLAUDE=0 ./docker-run.sh dev -s z3evo   # claude 셋업 skip
-
-# === Container 안 ===
-pip install -e ".[dev]"
-apt-get install -y z3
-export OPENAI_API_KEY="..."                 # 셸 안에서도 필요 (-e로 전달됨)
-./input/z3-bench/evolve/run_phase.sh 1
-```
-
-`OPENAI_API_KEY`라는 이름은 OpenEvolve가 OpenAI 호환 SDK를 쓰기 때문. 실제 라우팅은 `config.yaml`의 `api_base`가 결정 (Gemini, OpenAI, vLLM 등).
-
-### 4.4 docker-run.sh의 Claude Code 셋업 동작
-
-docker-run.sh가 [scripts/docker-init-claude.sh](../../../scripts/docker-init-claude.sh)를 컨테이너 startup 명령으로 실행. **멱등** (이미 설치돼 있으면 skip).
-
-| 단계 | 동작 | Skip 조건 |
-|---|---|---|
-| 1 | `~/.local/bin`을 PATH 추가 + `~/.bashrc` 영구화 | grep로 중복 차단 |
-| 2 | `claude` CLI 설치 (`curl -fsSL https://claude.ai/install.sh \| bash`) | `command -v claude` 성공 |
-| 3 | `pip install -e ".[claude-code]"` (= claude-agent-sdk) | `import claude_agent_sdk` 성공 |
-| 4 | Auth env var 체크 → 없으면 경고 | — |
-
-**영속화**: `--rm` 컨테이너지만 `~/.axion-docker-persist/claude-local/` → `/root/.local` 마운트로 설치 결과 호스트에 남음. 다음 컨테이너 즉시 사용.
-
-**자동 셋업 끄기**: `AUTO_INSTALL_CLAUDE=0 ./docker-run.sh ...`
-
-**Host OS별 차이**:
-- Linux host: host의 `claude` 바이너리도 read-only 자동 마운트 (`/usr/local/bin/claude`) → init script가 installer skip.
-- Mac host: cross-OS 불가 → init script가 standalone installer 실행 (Node 번들 포함).
-
-**Mount 요약** (root mode 기준):
-- `$HOME/.claude/` → `/root/.claude` (settings/sessions/projects 공유)
-- `~/.axion-docker-persist/claude-local/` → `/root/.local` (claude 바이너리 영속)
-- env forward: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`
-
-### 4.5 체크포인트 재개
-
-OpenEvolve가 `phase{N}_*/openevolve_output/checkpoints/checkpoint_K/`에 자동 저장. 재개:
-
-```bash
-cd input/z3-bench/evolve/phase2_sat/
-python /app/openevolve-run.py \
-    initial_program.py \
-    ../shared/evaluator.py \
-    --config ../config.yaml \
-    --checkpoint openevolve_output/checkpoints/checkpoint_50 \
-    --iterations 100
-```
-
-### 4.6 Detached 장시간 실행
-
-```bash
-./docker-run.sh dev -s z3evo -d
-docker exec -it axion-cell-container-dev-$USER-z3evo bash
-nohup ./input/z3-bench/evolve/run_phase.sh 1 \
-    &> /app/logs/phase1.log &
-```
-
-Detached mode에서도 init script가 background로 한 번 실행됨. `docker logs $CONTAINER_NAME`로 init 출력 확인.
-
-### 4.7 트러블슈팅
-
-| 증상 | 원인 / 해결 |
+| 키 | 값 |
 |---|---|
-| 진입 시 `[init-claude] no CLAUDE_CODE_OAUTH_TOKEN ...` 경고 | host에서 `claude setup-token` → token export → 재실행 |
-| `claude --version` 안 됨 | `source ~/.bashrc` 또는 `export PATH="$HOME/.local/bin:$PATH"` |
-| init이 매번 재설치 | `~/.axion-docker-persist/claude-local/` 마운트 누락 (rootless면 `$HOME` bind에 포함되어 있어야 함). `ls ~/.local/bin/claude` 확인 |
-| `pip install` 실패 | cwd 확인 (`pyproject.toml` 있는지) — rootless면 `cd $SCRIPT_DIR` 먼저 |
-| Rate limit | Pro/Max 5h window 소진. `OPENEVOLVE_MAX_PROBLEMS` 축소 또는 OpenAI 호환 백엔드 병행 |
-| Mac에서 host claude 마운트 시도 | Mac 바이너리는 Linux 컨테이너에서 안 돎 → docker-run.sh가 자동 skip하고 installer로 fallback |
+| `repeats` | 10 (10회 평균) |
+| `score_mode` | `speedup` (wall-clock) |
+| `enable_size_buckets` | `false` (z3는 단일 surface) |
+| `enable_outlier_stage` | `false` |
 
-### 4.8 CPU 핀닝 / 코어 격리 (측정 안정성)
+Cascade: stage1 (5문제) → stage2 (5문제) → stage3 (5문제, outlier) → stage4
+(20문제, 전체 spread). 각 stage gate는 `cascade_thresholds`.
 
-z3 wall-clock을 일관되게 재기 위해 컨테이너를 특정 코어에 고정. 호스트 사이드 격리(cgroup v2 isolated partition)와 컨테이너 핀닝을 짝지어 사용한다.
+정답성 regression (baseline decisive + variant mismatch)은 abort + `1e-6`
+penalty. invalid_param은 즉시 0점 + 어떤 키인지 artifact.
+
+## Clustering (config.yaml `bench.clustering`)
+
+| 키 | 값 |
+|---|---|
+| `method` | `kmeans` |
+| `feature` | `features.num_hard_constraints` (dominant size signal) |
+| `n_clusters` | 5 |
+| `max_baseline_ms` | 300000 (5분 cap) |
+| `stage_sizes` | stage1=5, stage2=5, stage3=5, stage4=20 |
+| `stage_clusters` | stage1=c0+c1, stage2=c2+c3, stage3=c4, stage4=전체 |
+
+`python -m _lib.sampler z3-bench`로 `cache/stage{1..4}_sample.json` 생성.
+
+## Phase별 surface
+
+cpsat과 달리 z3는 SIZE_BUCKETS / STAGE3_OVERRIDES 미사용. 단일 surface
+`OVERRIDES` 만 LLM 변이.
+
+| Phase | EVOLVE-BLOCK | inheritance |
+|---|---|---|
+| 1 (opt_sls) | `OVERRIDES = {}` | BASELINE only |
+| 2 (sat) | `OVERRIDES = {}` | + cache/phase1_best.json |
+| 3 (smt) | `OVERRIDES = {}` | + cache/phase2_best.json |
+| 4 (unified) | `UNIFIED_OVERRIDES = {}` | `_lib.prepare_phase`가 phase{1,2,3}_best union으로 자동 채움 |
+
+`get_params()` 적용 순서: `BASELINE → prior_phase_best → current OVERRIDES`.
+
+## Quick start
 
 ```bash
-# === Host (재부팅 없음) ===
-sudo ./scripts/host-isolate-cores.sh start    # cores 1-6 격리
-sudo ./scripts/host-isolate-cores.sh status   # 상태 확인
-# 끝나면
-sudo ./scripts/host-isolate-cores.sh stop     # 원복
+# 1. 전체 pipeline (sampler + rebaseline + 4 phases 순차)
+./input/run_phase.sh z3-bench --pin 2-7
 
-# === Docker 실행 ===
-./docker-run.sh dev -s z3evo --pin            # = --pin 1-6 (default)
-./docker-run.sh dev -s z3evo --pin 2-7        # 다른 범위
+# 2. 단계별
+python -m _lib.sampler z3-bench              # cache/stage{1..4}_sample.json
+python -m _lib.self_test z3-bench            # baseline sanity (stage1)
+python -m _lib.rebaseline z3-bench           # cache/local_baseline.json (10회 평균)
+./input/run_phase.sh z3-bench 1 --pin 2-7
+./input/run_phase.sh z3-bench 2 --pin 2-7
+./input/run_phase.sh z3-bench 3 --pin 2-7
+./input/run_phase.sh z3-bench 4 --pin 2-7
+
+# 3. 최종 검증 — run_phase.sh가 마지막 phase 후 자동 생성한 final_program.py 사용
+python -m _lib.final_verify z3-bench \
+    input/z3-bench/evolve/final_program.py
 ```
 
-`--pin` 동작:
-- `--cpuset-cpus=<list>` 추가 (커널 cpuset 강제)
-- `/sys/fs/cgroup/isolated.slice` 존재 시 `--cgroup-parent=/isolated.slice`로 격리된 cgroup에 합류 (없으면 경고만)
-- 컨테이너 엔트리포인트를 `taskset -c <list> bash -lc ...`로 래핑
+마지막 phase 완료 후 `_lib.finalize`가 자동 실행 →
+`<bench>/evolve/final_program.py`에 phase4 best_program.py 복사. 이 파일이
+canonical evolved 결과. 수동 재생성: `python -m _lib.finalize z3-bench`.
 
-`host-isolate-cores.sh start` 메커니즘:
-- `/sys/fs/cgroup/isolated.slice` 생성 → `cpuset.cpus=1-6`, `cpuset.cpus.partition=isolated`
-- 커널이 1-6을 system.slice/user.slice 등 다른 모든 cgroup에서 제거 + 스케줄러 load-balancing 끔
-- `/proc/irq/*/smp_affinity`를 `0,7-19`로 마스크 → 디바이스 IRQ가 격리 코어에 안 떨어짐
-- 상태/IRQ 백업은 `/var/lib/host-isolate-cores/`에 저장됨 (stop이 원복)
+각 non-final phase 완료 후 `_lib.extract_best`가
+`cache/phaseN_best.json` 자동 생성. Phase 4 시작 전
+`_lib.prepare_phase`가 EVOLVE-BLOCK 머터리얼.
 
-| 변수 | 기본 | 용도 |
-|---|---|---|
-| `ISOLATED_CPUS` | `1-6` | 격리할 CPU 리스트 (`host-isolate-cores.sh`) |
-| `CGROUP_NAME` | `isolated.slice` | 격리 cgroup 이름 |
-| `ISOLATED_CGROUP_NAME` | `isolated.slice` | `docker-run.sh`가 합류할 cgroup 이름 |
-
-**한계**: 런타임 격리로는 커널 스레드(kthread)와 타이머 틱은 못 막음. 완전 격리가 필요하면 boot param을 추가하고 재부팅:
+## Score 공식 (speedup mode)
 
 ```
-isolcpus=1-6 nohz_full=1-6 rcu_nocbs=1-6
+combined_score = weighted_geomean(speedup) * solved_rate^2 * efficiency^STATS_WEIGHT
+
+speedup       = baseline_ms / variant_ms           (match 시)
+              = 1e-6                                (regression 시)
+weight        = baseline_ms                        (긴 문제 dominate)
+efficiency    = geomean over {conflicts(w=2), decisions(w=1.5), propagations(w=0.5)}
+                of (baseline_stat + 1) / (variant_stat + 1), clipped [0.1, 10]
 ```
 
-(`host-isolate-cores.sh start` 출력 마지막에 같은 안내가 나옴.)
+- 매치 (baseline Sat→variant Sat 또는 Unsat→Unsat) 시 wall-clock ratio가
+  점수에 기여.
+- Mismatch (baseline decided + variant Unknown/timeout/opposite) 시 `1e-6`
+  → 한 문제 regression이 geomean을 크게 감점.
+- baseline이 Unknown인 경우 variant가 풀어내면 개선으로 카운트, regression
+  아님.
 
-## 5. 환경 변수
+## Locked params
 
-| 변수 | 기본 | 용도 |
-|---|---|---|
-| `OPENAI_API_KEY` | — | LLM API 키 (api_base에 맞는 것) |
-| `OPENEVOLVE_MAX_PROBLEMS` | 50 | stage2 문제수 상한 (테스트용 축소) |
-| `OPENEVOLVE_STAGE1_TIMEOUT` | 15 | stage1 문제당 초 |
-| `OPENEVOLVE_STAGE2_TIMEOUT` | 120 | stage2 문제당 초 |
-| `OPENEVOLVE_Z3_BIN` | `z3` | z3 바이너리 경로 |
+`sat.random_seed=0`, `smt.random_seed=0`, `sls.random_seed=0`,
+`parallel.enable=false`, `threads=1`. 위반 시 `combined_score=0`.
 
-## 6. 도커 안에서 추가 검증 필요
+## 디버깅 / 트러블슈팅
 
-- `z3 -pmd | less` 출력으로 4.13.3.0의 실제 키 검증 (일부 키명/타입이 마이너 버전마다 다를 수 있음)
-- baseline 변이로 stage1 1회 평가 직접 호출 → z3 binary 동작/타임아웃 검증
-- LLM API 호출 sanity check (`config.yaml`의 api_base + 키 매칭)
+| 증상 | 대응 |
+|---|---|
+| `invalid_param: <key>` artifact | params.json 카탈로그에 누락된 키. `_lib.params_catalog`가 catch하거나 z3 binary가 reject. params.json `groups[*].params[*]`에 추가하거나 LLM prompt에 명시. |
+| Result regression abort | baseline은 Sat/Unsat인데 variant Unknown/timeout. presolve / SLS / restart 튜닝이 completeness 깬 경우 많음. |
+| 로컬 baseline mismatch | `_lib.rebaseline`이 raw baseline과 불일치 결과 → evaluator는 raw_ms fallback. Z3 binary 버전 차이 또는 hardware noise. |
+
+## 참고
+
+- 파라미터 카탈로그 + 검증: `params.json` (rich schema). 1265개 Z3 4.13.x
+  키 중 LLM이 실제로 변이하는 ~27개 그룹화 + type/enum/range/desc 명시.
+- 환경 변수: [`input/README.md`](../../README.md#environment-knobs) 참고.
+- Z3 도커 셋업 / Claude Code 백엔드 / CPU 핀닝: 이전 버전 본 문서
+  (`git log -p`) 또는 `docker-run.sh --help` 참고.

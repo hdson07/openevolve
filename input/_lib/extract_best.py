@@ -1,19 +1,22 @@
 """
-Generic per-phase winner extractor. Per-bench `extract_best.py` wrappers
-provide PHASE_DIRS and call `main(root, shared, phase_dirs)`.
+Per-phase winner extractor.
 
-After phase N completes, load get_phase_overrides() from its best_program.py
-(default: openevolve_output/best/best_program.py) and write
-shared/phaseN_best.json. The next phase's initial_program.py picks it up.
+CLI:  `python -m _lib.extract_best <bench> <phase> [--from-checkpoints]`
 
---from-checkpoints scans openevolve_output/checkpoints/checkpoint_*/ and
-picks the program with the highest combined_score (best_program_info.json).
+Loads `get_phase_overrides()` from a phase's `best_program.py` and writes
+`<bench>/evolve/cache/phaseN_best.json`. The next phase's
+`initial_program.py` (or `prepare_phase`) picks it up.
+
+--from-checkpoints scans `<phase>/openevolve_output/checkpoints/checkpoint_*/`
+and picks the program with the highest combined_score.
 """
 import argparse
 import importlib.util
 import json
 import pathlib
 import sys
+
+from _lib import bench_paths
 
 
 def _pick_from_checkpoints(phase_dir):
@@ -55,24 +58,52 @@ def _pick_from_checkpoints(phase_dir):
     return best_py
 
 
-def main(root, shared, phase_dirs, argv=None):
+def _phase_dirs_from_config(bench_root):
+    cfg = bench_paths.load_config(bench_root)
+    phases = (cfg.get("bench") or {}).get("phases") or []
+    return {i + 1: ph["dir"] for i, ph in enumerate(phases)}
+
+
+def main(root=None, shared=None, phase_dirs=None, argv=None):
+    """Two invocation modes:
+
+    1. CLI:  argv = ["<bench>", "<phase>", ...]
+       → resolves root/shared/phase_dirs from bench config.yaml.
+       shared is `<bench>/evolve/cache/`.
+
+    2. Direct (legacy): explicit root, shared, phase_dirs args.
+       Retained for tests / one-off use.
     """
-    root        — bench evolve dir (pathlib.Path)
-    shared      — bench evolve/shared dir (pathlib.Path)
-    phase_dirs  — {phase_int: "phaseN_<name>"} (excludes the final/unified phase)
-    """
-    choices = sorted(phase_dirs.keys())
-    ap = argparse.ArgumentParser(
-        description="Extract get_phase_overrides() from phase's best_program.py.")
-    ap.add_argument("phase", type=int, choices=choices, help="phase number")
-    ap.add_argument("--from-checkpoints", action="store_true",
-                    help="scan checkpoint_*/ dirs and pick highest combined_score")
-    args = ap.parse_args(argv)
+    if root is None or phase_dirs is None:
+        ap = argparse.ArgumentParser(
+            description="Extract get_phase_overrides() from phase's best_program.py.")
+        ap.add_argument("bench", help="bench dir name (e.g. cpsat-bench)")
+        ap.add_argument("phase", type=int, help="phase number")
+        ap.add_argument("--from-checkpoints", action="store_true",
+                        help="scan checkpoint_*/ dirs and pick highest combined_score")
+        args = ap.parse_args(argv)
+        root = bench_paths.resolve_bench(args.bench)
+        shared = bench_paths.cache_dir(root)
+        shared.mkdir(parents=True, exist_ok=True)
+        phase_dirs = _phase_dirs_from_config(root)
+        if args.phase not in phase_dirs:
+            print(f"phase must be in {sorted(phase_dirs.keys())} "
+                  f"(got: {args.phase})", file=sys.stderr)
+            sys.exit(2)
+        from_checkpoints = args.from_checkpoints
+    else:
+        ap = argparse.ArgumentParser(
+            description="Extract get_phase_overrides() from phase's best_program.py.")
+        ap.add_argument("phase", type=int, choices=sorted(phase_dirs.keys()),
+                        help="phase number")
+        ap.add_argument("--from-checkpoints", action="store_true")
+        args = ap.parse_args(argv)
+        from_checkpoints = args.from_checkpoints
 
     n = args.phase
     phase_dir = pathlib.Path(root) / phase_dirs[n]
 
-    if args.from_checkpoints:
+    if from_checkpoints:
         best_py = _pick_from_checkpoints(phase_dir)
     else:
         best_py = phase_dir / "openevolve_output" / "best" / "best_program.py"
@@ -160,3 +191,7 @@ def main(root, shared, phase_dirs, argv=None):
         out_s = shared_dir / f"phase{n}_stage3.json"
         out_s.write_text(json.dumps(stage3, indent=2, sort_keys=True) + "\n")
         print(f"wrote {out_s.relative_to(root_path)} ({len(stage3)} keys)")
+
+
+if __name__ == "__main__":
+    main()

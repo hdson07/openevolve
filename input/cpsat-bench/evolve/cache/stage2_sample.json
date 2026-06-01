@@ -1,0 +1,79 @@
+{
+  "selection": "10 from 332 candidates",
+  "criteria": "kmeans-clusters=[2, 3] feature=features.num_constraints spread=quintile",
+  "source": "cpsat-bench/problems.jsonl",
+  "sha256": [
+    "4c230e355482c3652bd60bf83cf4ad77382cdb0b9abe08c27007683545e8f071",
+    "9c3c55cd54e6074a7e2732ccfaac2e90698141e7e9fb30c946657a21fb186061",
+    "6ecbb5bc3a035ad7b51348fac58112aa35296e0e6ae9405119a1296fb9384045",
+    "e5c9e667fbee60ca8a589904e1a7afc30c81394efd58e388a9f63470fa4ea406",
+    "b13bb2432694ba5fe9768abc03525698986ba13ffe70a7112b90bd7fbad02aec",
+    "f7041abae337b502aa03618b1c0f40cc693acb9c0bd48efe21b41c42a7849bef",
+    "f77cdd0764d8aa490133369275f4d62d71f47133f6102d90caa9a799c69ddc63",
+    "f5931bc8ee19786a4ade31e56bdc19d415c4dbfa42da07785765944fe6748326",
+    "a46c87c567e8ea0a6fa70198b83d8523a69f38448aeafbb35a956a845987993a",
+    "58d58a76371ef7762bf96386ce5d2677d1bfc7d7df745d40f4a02bd30006662d"
+  ],
+  "summary": [
+    {
+      "sha": "4c230e355482",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 3021.82,
+      "features.num_constraints": 42727
+    },
+    {
+      "sha": "9c3c55cd54e6",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 4022.2,
+      "features.num_constraints": 58096
+    },
+    {
+      "sha": "6ecbb5bc3a03",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 5580.53,
+      "features.num_constraints": 58433
+    },
+    {
+      "sha": "e5c9e667fbee",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 6608.39,
+      "features.num_constraints": 47566
+    },
+    {
+      "sha": "b13bb2432694",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 8842.37,
+      "features.num_constraints": 57828
+    },
+    {
+      "sha": "f7041abae337",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 11511.1,
+      "features.num_constraints": 38286
+    },
+    {
+      "sha": "f77cdd0764d8",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 14497.4,
+      "features.num_constraints": 47233
+    },
+    {
+      "sha": "f5931bc8ee19",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 18510.4,
+      "features.num_constraints": 45243
+    },
+    {
+      "sha": "a46c87c567e8",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 25758.6,
+      "features.num_constraints": 62282
+    },
+    {
+      "sha": "58d58a76371e",
+      "baseline_result": "OPTIMAL",
+      "baseline_ms": 80851.6,
+      "features.num_constraints": 64588
+    }
+  ]
+}

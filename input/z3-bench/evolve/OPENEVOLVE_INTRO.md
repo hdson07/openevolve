@@ -168,9 +168,13 @@ python openevolve-run.py \
 - `sls.random_seed = 0`
 - `parallel.enable = False`
 
-**Phase 간 핸드오프**: 자동. P{N} 종료 후 `run_phase.sh`가 `extract_best.py N` 자동 호출 → `shared/phase{N}_best.json` 작성 → P{N+1}이 import.
+**Phase 간 핸드오프**: 자동. P{N} 종료 후 `run_phase.sh`가
+`python -m _lib.extract_best z3-bench N` 자동 호출 → `cache/phase{N}_best.json`
+작성 → P{N+1}이 import.
 
-P4 시작 시 `prepare_phase4.py` 자동 실행 → `phase4_unified/initial_program.py`의 EVOLVE-BLOCK을 union dict literal로 머터리얼라이즈 (LLM이 diff 편집 가능하도록).
+P4 시작 전 `python -m _lib.prepare_phase z3-bench` 자동 실행 →
+`phase4_unified/initial_program.py`의 EVOLVE-BLOCK을 union dict literal로
+머터리얼라이즈 (LLM이 diff 편집 가능하도록).
 
 ## 4. 스코어링
 

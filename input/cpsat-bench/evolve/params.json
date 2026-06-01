@@ -1,0 +1,235 @@
+{
+  "solver": "cpsat",
+  "version": "ortools 9.14.6206",
+
+  "defaults": {
+    "num_search_workers": 1,
+    "random_seed": 0,
+    "interleave_search": true
+  },
+
+  "locked": {
+    "random_seed": 0
+  },
+
+  "subsolver_names": [
+    "default_lp", "no_lp", "max_lp", "core", "quick_restart",
+    "reduced_costs", "lb_tree_search", "probing_search",
+    "objective_lb_search", "objective_shaving_search_no_lp",
+    "pseudo_costs", "fixed", "feasibility_pump", "feasibility_jump"
+  ],
+
+  "groups": {
+    "parallel": {
+      "description": "Worker pool and subsolver mix. Pinned per-phase via PHASE_LOCKED; do not change inside get_params() except via the phase module.",
+      "params": {
+        "num_search_workers": {
+          "type": "int", "default": 1, "range": [1, 64],
+          "desc": "Number of parallel solver subprocesses. Locked per phase."
+        },
+        "interleave_search": {
+          "type": "bool", "default": false,
+          "desc": "Interleave subsolvers via deterministic time slicing."
+        },
+        "extra_subsolvers": {
+          "type": "list", "element_type": "subsolver", "default": [],
+          "desc": "Additional subsolvers to spin up beyond the default mix."
+        },
+        "ignore_subsolvers": {
+          "type": "list", "element_type": "subsolver", "default": [],
+          "desc": "Subsolvers to suppress from the default mix."
+        },
+        "share_glue_clauses": {
+          "type": "bool", "default": false,
+          "desc": "Share learned glue clauses across workers."
+        },
+        "share_glue_clauses_dtime": {
+          "type": "float", "default": 1.0, "range": [0.0, 10.0],
+          "desc": "Deterministic-time budget between glue-clause shares."
+        }
+      }
+    },
+
+    "presolve_probing": {
+      "description": "Presolve, probing, and symmetry detection knobs.",
+      "params": {
+        "cp_model_probing_level": {
+          "type": "int", "default": 2, "range": [0, 3],
+          "desc": "Probing aggressiveness. 0=off, 3=most aggressive."
+        },
+        "cp_model_presolve": {
+          "type": "bool", "default": true,
+          "desc": "Run presolve pass before search."
+        },
+        "presolve_use_bva": {
+          "type": "bool", "default": true,
+          "desc": "Use bounded variable addition during presolve."
+        },
+        "presolve_bve_threshold": {
+          "type": "int", "default": 500, "range": [0, 100000],
+          "desc": "Max product growth allowed for bounded variable elimination."
+        },
+        "presolve_inclusion_work_limit": {
+          "type": "int", "default": 100000000, "range": [0, 10000000000],
+          "desc": "Work limit for clause-inclusion checks in presolve."
+        },
+        "merge_at_most_one_work_limit": {
+          "type": "int", "default": 100000000, "range": [0, 10000000000],
+          "desc": "Work limit for at-most-one constraint merging."
+        },
+        "probing_num_combinations_limit": {
+          "type": "int", "default": 20000, "range": [0, 10000000],
+          "desc": "Cap on probing combinations explored."
+        },
+        "symmetry_level": {
+          "type": "int", "default": 2, "range": [0, 3],
+          "desc": "Symmetry detection depth. Higher = more aggressive."
+        }
+      }
+    },
+
+    "lp_cuts": {
+      "description": "Linear-programming relaxation and cut-generation knobs.",
+      "params": {
+        "linearization_level": {
+          "type": "int", "default": 1, "range": [0, 2],
+          "desc": "Aggressiveness of LP linearization. 0=off, 2=most aggressive."
+        },
+        "cut_level": {
+          "type": "int", "default": 1, "range": [0, 2],
+          "desc": "Cut-generation aggressiveness. 0=no cuts."
+        },
+        "max_num_cuts": {
+          "type": "int", "default": 10000, "range": [0, 50000],
+          "desc": "Cap on cuts kept in the LP."
+        },
+        "cut_cleanup_target": {
+          "type": "int", "default": 1000, "range": [0, 50000],
+          "desc": "Number of cuts kept after periodic cleanup."
+        },
+        "add_mir_cuts": {
+          "type": "bool", "default": true,
+          "desc": "Mixed-integer rounding cuts."
+        },
+        "add_zero_half_cuts": {
+          "type": "bool", "default": true,
+          "desc": "Zero-half cuts."
+        },
+        "add_clique_cuts": {
+          "type": "bool", "default": true,
+          "desc": "Clique cuts."
+        },
+        "add_objective_cut": {
+          "type": "bool", "default": false,
+          "desc": "Add objective-bound cut."
+        },
+        "root_lp_iterations": {
+          "type": "int", "default": 2000, "range": [0, 100000],
+          "desc": "LP iterations at root node."
+        },
+        "new_constraints_batch_size": {
+          "type": "int", "default": 50, "range": [1, 1000],
+          "desc": "Batch size for adding new constraints to LP."
+        }
+      }
+    },
+
+    "clause_db": {
+      "description": "Learned clause database management.",
+      "params": {
+        "clause_cleanup_period": {
+          "type": "int", "default": 10000, "range": [1000, 100000],
+          "desc": "Conflicts between clause-db cleanups. Higher = keep clauses longer."
+        },
+        "clause_cleanup_target": {
+          "type": "int", "default": 0, "range": [0, 200000],
+          "desc": "Target size after cleanup. 0 = ratio-based."
+        },
+        "clause_cleanup_lbd_bound": {
+          "type": "int", "default": 5, "range": [2, 20],
+          "desc": "Clauses with LBD <= bound survive cleanup."
+        },
+        "clause_cleanup_ordering": {
+          "type": "int", "default": 0, "range": [0, 1],
+          "desc": "0=CLAUSE_ACTIVITY, 1=CLAUSE_LBD."
+        }
+      }
+    },
+
+    "search_branching": {
+      "description": "Top-level search strategy and branching heuristics.",
+      "params": {
+        "search_branching": {
+          "type": "int", "default": 0, "range": [0, 8],
+          "desc": "0=AUTOMATIC, 1=FIXED, 2=PORTFOLIO, 3=LP, 4=PSEUDO_COST, 5=PORTFOLIO_WITH_QUICK_RESTART, 6=HINT, 7=PARTIAL_FIXED, 8=RANDOMIZED."
+        },
+        "use_strong_propagation_in_disjunctive": {
+          "type": "bool", "default": false,
+          "desc": "Stronger (more expensive) propagation in disjunctive constraints."
+        },
+        "use_erwa_heuristic": {
+          "type": "bool", "default": false,
+          "desc": "Exponential recency weighted average branching."
+        },
+        "repair_hint": {
+          "type": "bool", "default": false,
+          "desc": "Repair inconsistent solution hints."
+        }
+      }
+    },
+
+    "optimization": {
+      "description": "Objective-search and solution-pool knobs.",
+      "params": {
+        "exploit_best_solution": {
+          "type": "bool", "default": false,
+          "desc": "Use incumbent objective to prune branches."
+        },
+        "exploit_relaxation_solution": {
+          "type": "bool", "default": false,
+          "desc": "Use LP relaxation solution to guide search."
+        },
+        "exploit_all_precedences": {
+          "type": "bool", "default": false,
+          "desc": "Propagate all derived precedence relations."
+        },
+        "solution_pool_size": {
+          "type": "int", "default": 3, "range": [1, 100],
+          "desc": "Maximum solutions kept in the pool."
+        }
+      }
+    },
+
+    "mip_bridge": {
+      "description": "MIP-style numeric tolerances and scaling.",
+      "params": {
+        "mip_check_precision": {
+          "type": "float", "default": 0.0001, "range": [1e-10, 0.1],
+          "desc": "Precision threshold for MIP feasibility checks."
+        },
+        "mip_drop_tolerance": {
+          "type": "float", "default": 1e-16, "range": [1e-20, 1e-4],
+          "desc": "Drop coefficients below this magnitude in MIP."
+        },
+        "mip_max_bound": {
+          "type": "float", "default": 10000000.0, "range": [1.0, 1e15],
+          "desc": "Maximum finite bound for MIP variables."
+        },
+        "mip_var_scaling": {
+          "type": "float", "default": 1.0, "range": [0.001, 1000.0],
+          "desc": "Per-variable scaling factor for MIP bridge."
+        }
+      }
+    },
+
+    "seed": {
+      "description": "Reproducibility. random_seed is LOCKED; do not modify.",
+      "params": {
+        "random_seed": {
+          "type": "int", "default": 0, "range": [0, 2147483647],
+          "desc": "Locked at 0 across all phases."
+        }
+      }
+    }
+  }
+}

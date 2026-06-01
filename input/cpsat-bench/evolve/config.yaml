@@ -17,18 +17,50 @@ bench:
       iters: 40
     - dir: phase5_custom_subsolvers
       iters: 40
-  unified_prepare_script: prepare_phase_unified.py
-  # The unified-prepare script materializes phase4_unified from phase{1,2,3}
-  # winners. phase4 is no longer the last phase (phase5 is), so the prep must
-  # fire before phase4 specifically, not "before the last phase". When unset,
-  # run_phase.sh falls back to the legacy "before last phase" trigger.
+
+  # When unset, run_phase.sh fires the unified-prep before the last phase.
+  # cpsat keeps a phase AFTER phase4_unified, so the prep targets phase4
+  # specifically.
   unified_prepare_before_dir: phase4_unified
+
   solver_check_cmd: 'python -c "from ortools.sat.python import cp_model"'
   solver_install_hint: "install: pip install ortools"
-  # optional script-name overrides (defaults shown):
-  # rebaseline_script: rebaseline_local.py
-  # extract_best_script: extract_best.py
-  # build_samples_script: build_samples.py
+
+  # === Refactor (2026-06) — paths to per-bench solver-specific files. ===
+  # Resolved relative to <bench>/evolve/.
+  adapter: adapter.py
+  params_catalog: params.json
+  worker_path: _solve_worker.py
+  unified_dict_name: GLOBAL_OVERRIDES
+
+  # === Clustering / stage sampling (consumed by _lib.sampler). ===
+  clustering:
+    method: kmeans                 # kmeans | quintile | thresholds
+    feature: features.num_constraints
+    n_clusters: 5
+    max_baseline_ms: 120000        # drop outliers > 120s from sample pool
+    spread: quintile
+    stage_sizes:
+      stage1: 10
+      stage2: 10
+      stage3: 5
+      stage4: 20
+    stage_clusters:
+      stage1: [0, 1]
+      stage2: [2, 3]
+      stage3: [4]
+      stage4: [0, 1, 2, 3, 4]
+
+  # === Evaluation behavior (consumed by _lib.evaluator_core). ===
+  evaluation:
+    repeats: 10                    # 10-run averaging by default
+    timeout_factor: 1.3
+    min_timeout_s: 5
+    score_mode: cost               # cpsat: cost (dtime + cost_ratio)
+    time_metric: dtime
+    cost_weight: 1.0
+    enable_size_buckets: true      # opt-in: SIZE_BUCKETS per-problem overrides
+    enable_outlier_stage: true     # opt-in: STAGE3_OVERRIDES outlier-only knobs
 
 # === Custom cpsat-bench knobs (silently ignored by openevolve dacite) ===
 # parallel_solvers: total concurrent CP-SAT worker subprocesses per stage.

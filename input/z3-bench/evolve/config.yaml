@@ -11,9 +11,42 @@ bench:
     - dir: phase2_sat
     - dir: phase3_smt
     - dir: phase4_unified
-  unified_prepare_script: prepare_phase4.py
+
   solver_check_cmd: "command -v z3"
   solver_install_hint: "install: apt-get install -y z3  or  pip install z3-solver"
+
+  # === Refactor (2026-06) — paths to per-bench solver-specific files. ===
+  adapter: adapter.py
+  params_catalog: params.json
+  worker_path: _solve_worker.py
+  unified_dict_name: UNIFIED_OVERRIDES
+
+  # === Clustering / stage sampling. ===
+  clustering:
+    method: kmeans
+    feature: features.num_hard_constraints
+    n_clusters: 5
+    max_baseline_ms: 300000        # 5 min cap
+    spread: quintile
+    stage_sizes:
+      stage1: 5
+      stage2: 5
+      stage3: 5
+      stage4: 20
+    stage_clusters:
+      stage1: [0, 1]
+      stage2: [2, 3]
+      stage3: [4]
+      stage4: [0, 1, 2, 3, 4]
+
+  # === Evaluation behavior. ===
+  evaluation:
+    repeats: 10
+    timeout_factor: 1.3
+    min_timeout_s: 5
+    score_mode: speedup            # z3: wall-clock speedup
+    enable_size_buckets: false
+    enable_outlier_stage: false
 
 # === Custom z3-bench knobs (silently ignored by openevolve dacite parser) ===
 # parallel_solvers: total concurrent z3 worker subprocesses per stage.

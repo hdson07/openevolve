@@ -1,309 +1,205 @@
-# cpsat-bench Parameter Tuning via OpenEvolve
+# cpsat-bench — OR-tools CP-SAT 파라미터 튜닝
 
-Tune OR-tools CP-SAT (`ortools.sat.python.cp_model`) parameters by
-evolutionary search on the `input/cpsat-bench/raw-data` dataset (85 OPTIMAL
-instances stored as binary `CpModelProto`). Goal: minimize wall-clock vs
-baseline while preserving feasibility / objective.
+OR-tools CP-SAT (`ortools.sat.python.cp_model`) 파라미터를 진화적 탐색으로
+튜닝. 데이터셋: `input/cpsat-bench/raw-data/` (85개 OPTIMAL 인스턴스, 바이너리
+`CpModelProto`). 목표: baseline 대비 `deterministic_time` 최소화, 정답성
+(`OPTIMAL` / `FEASIBLE`) 유지.
 
-> OpenEvolve concept primer: see `input/z3-bench/evolve/OPENEVOLVE_INTRO.md` —
-> z3-bench is the canonical reference impl; the pattern here is identical
-> (cost-mode scoring instead of decision-mode is the only difference).
+플랫폼 전반 구조는 [`input/README.md`](../../README.md) 참고. 본 문서는
+cpsat-bench 고유 사항만 다룬다.
 
-## Layout
+## 디렉토리 구조
 
 ```
 input/cpsat-bench/
-├── raw-data/                          # flat layout (mirrors z3-bench)
-│   ├── load_script.sh                 # gitlab pkg 71 downloader
-│   ├── <sha>.cpsat.pb                 # binary CpModelProto
-│   └── <sha>__<applied_hash>__seed0.meta.jsonl
-├── problems.jsonl                     # built by build_samples.py
+├── raw-data/                          # <sha>.cpsat.pb + meta.jsonl
+├── problems.jsonl                     # baseline 실행 기록 (855 rows)
 └── evolve/
-    ├── README.md                      # this file
-    ├── config.yaml                    # OpenEvolve config + custom knobs
-    ├── run_phase.sh                   # phase runner (chmod +x)
-    ├── build_samples.py               # stage{1..4} sample selection
-    ├── extract_best.py                # per-phase winner extraction (1..4)
-    ├── prepare_phase_unified.py       # materializes phase4 EVOLVE-BLOCK
-    ├── rebaseline_local.py            # measure baseline on local box
-    ├── shared/
-    │   ├── baseline_params.py         # BASELINE + LOCKED
-    │   ├── score.py                   # cost mode
-    │   ├── runtime.py                 # config.yaml passthrough
-    │   ├── evaluator.py               # cascade stages
-    │   ├── cpsat_runner.py            # subprocess solver invoker
-    │   ├── _cpsat_solve_worker.py
-    │   ├── stage{1..4}_sample.json    # small profile (cascade staging)
-    │   ├── stage1_large_sample.json   # large profile (single hardest outlier)
-    │   └── local_baseline.json        # built by rebaseline_local.py
-    ├── phase{1..4}_<name>/
-    │   └── initial_program.py         # EVOLVE-BLOCK (top-level param tuning)
-    └── phase5_custom_subsolvers/
-        └── initial_program.py         # EVOLVE-BLOCK (adds custom subsolvers)
+    ├── config.yaml                    # bench / LLM / clustering / evaluation
+    ├── params.json                    # CP-SAT 파라미터 카탈로그
+    ├── adapter.py                     # solver hooks
+    ├── _solve_worker.py               # ortools 호출 subprocess
+    ├── phase1_search/                 # search / subsolvers
+    ├── phase2_presolve/               # presolve / probing / symmetry
+    ├── phase3_lp_cuts/                # LP / cuts / MIP-bridge (W=8)
+    ├── phase4_unified/                # unified refinement (W=8, 자동 머터리얼)
+    ├── phase5_custom_subsolvers/      # custom subsolver portfolio (W=8)
+    └── cache/                         # 생성물, 삭제 안전
+        ├── stage{1..4}_sample.json
+        ├── local_baseline.json
+        ├── phase{N}_best.json
+        ├── phase{N}_buckets.json      # SIZE_BUCKETS 결과 (opt-in)
+        └── phase{N}_stage3.json       # STAGE3_OVERRIDES 결과 (opt-in)
 ```
 
-## Evaluation flow (cascade)
+## 평가 흐름
 
-The cascade differs by profile — see [Profiles](#profiles-small-vs-large).
-The **small** profile (default) is:
+`config.yaml` `bench.evaluation`:
 
-```
-LLM-mutated initial_program.py
-    ↓
-evaluator.py:
-    1. get_params(problem=None, stage=...) → global dict (workers/locked)
-    2. LOCKED-violation check (random_seed, num_search_workers, timeout_sec)
-    3. stage1 (10 problems, runtime c1+c2 cluster centers):
-        get_params(problem=p, stage="stage1") per problem
-        each solve repeated 10× and averaged (dtime); invalid_param → early 0
-        score → gate (cascade_thresholds[0]) → stage2
-    4. stage2 (10 problems, runtime c3+c4 cluster centers): same
-    5. stage3 slot = _finalize_small(): merge cached stage1 + stage2 results
-        into ONE combined final score. No outlier stage3, no broad stage4.
-```
+| 키 | 값 |
+|---|---|
+| `repeats` | 10 (10회 평균) |
+| `score_mode` | `cost` (deterministic_time + cost_ratio) |
+| `time_metric` | `dtime` |
+| `enable_size_buckets` | `true` — 문제 크기별 override |
+| `enable_outlier_stage` | `true` — stage3 outlier 전용 override |
 
-Non-feasible variants are NOT aborted — their real (slow) timeout ratio plus
-a `solved_rate` drop is the penalty. Scoring uses `deterministic_time`.
+Cascade: stage1 (10문제, 작은-중간 클러스터) → stage2 (10문제) → stage3
+(5문제, outlier) → stage4 (20문제, 전체 spread). 각 stage gate는
+`cascade_thresholds`.
 
-> The **large** profile bypasses staging entirely: every cascade entry point
-> evaluates a single hardest-outlier set once (cache-backed). The default
-> `build_samples.py` (no `--small`) still emits a 4-stage layout
-> (stage3=outliers, stage4=broad) for ad-hoc analysis / `evaluate_stage4`,
-> but the small cascade ignores stage3/4.
+비결정 변형 (UNKNOWN / INFEASIBLE)은 abort 안 함 — 실측 (느린) timeout
+ratio가 점수에 반영 + `solved_rate^2` drop이 추가 penalty.
 
-### Per-problem param resolution
+## Clustering (config.yaml `bench.clustering`)
 
-Each phase's `initial_program.py` exposes three evolution surfaces inside its
-EVOLVE-BLOCK:
+| 키 | 값 |
+|---|---|
+| `method` | `kmeans` |
+| `feature` | `features.num_constraints` |
+| `n_clusters` | 5 |
+| `max_baseline_ms` | 120000 (> 120s outlier 제외) |
+| `stage_sizes` | stage1=10, stage2=10, stage3=5, stage4=20 |
+| `stage_clusters` | stage1=c0+c1, stage2=c2+c3, stage3=c4, stage4=전체 |
 
-| Surface | Applied when | Purpose |
+`python -m _lib.sampler cpsat-bench`로 `cache/stage{1..4}_sample.json` 생성.
+
+## Phase별 surface
+
+각 phase `initial_program.py`의 EVOLVE-BLOCK에는 세 surface:
+
+| Surface | 적용 조건 | 용도 |
 |---|---|---|
-| `GLOBAL_OVERRIDES` | every problem | baseline params for the phase |
-| `SIZE_BUCKETS` | `num_constraints` matches the bucket's upper bound | trade off cuts / probing / subsolver mix by problem size (small <50k / mid 50–150k / large ≥150k) |
-| `STAGE3_OVERRIDES` | `stage == "stage3"` AND `problem.is_outlier` | tune outlier-specific knobs without regressing normal problems |
+| `GLOBAL_OVERRIDES` | 모든 문제 | phase 기본 튜닝 |
+| `SIZE_BUCKETS` | `problem["size"]` (= num_constraints)이 bucket upper 미만 | 크기별 cuts / probing / subsolver mix tradeoff |
+| `STAGE3_OVERRIDES` | `stage == "stage3"` AND `problem["is_outlier"]` | long-tail outlier 전용 |
 
-Apply order inside `get_params()`:
-`BASELINE → prior_phase_globals → GLOBAL_OVERRIDES → SIZE_BUCKETS match →
-STAGE3_OVERRIDES (gated) → PHASE_LOCKED`.
+`get_params(problem, stage)` 적용 순서:
+`BASELINE → GLOBAL_OVERRIDES → SIZE_BUCKETS 매치 → STAGE3_OVERRIDES (gated)
+→ PHASE_LOCKED`.
 
-`is_outlier` is set from `shared/outliers.json`, generated by `build_samples.py`
-from `Statistics/outliers_top.csv`. Reference for valid CP-SAT param names:
-`shared/cpsat_params_reference.md` (275 fields, grouped by category).
+`size` 값은 `adapter.get_problem_size(features)` (= `num_constraints`)에서
+나옴.
 
 ## Phase 5: custom subsolvers
 
-Phases 1–4 tune **top-level** CP-SAT parameters. Phase 5 instead adds **custom
-subsolvers** to the portfolio, leaving the inherited top-level config (phase4
-winner) untouched.
+Phase 1-4가 top-level 파라미터를 튜닝하는 반면, Phase 5는 portfolio에
+**custom subsolver를 추가**한다 (inherited phase4 top-level config는 건드리지
+않음).
 
-Why a separate mechanism: a top-level param applies to *every* subsolver,
-including the LNS workers. An expensive propagation technique enabled top-level
-also fires inside LNS, making it useless; an objective-requiring config on an
-objective-less model makes CP-SAT drop most/all subsolvers. Isolating the knob
-in a single extra subsolver bounds the downside — if it doesn't help only that
-one worker is slow; if it helps, that worker shares solutions / variable bounds
-with the rest of the portfolio.
+이유: top-level 파라미터는 모든 subsolver (LNS worker 포함)에 적용됨.
+expensive propagation을 top-level에 켜면 LNS도 같이 비싸져 portfolio가
+무너짐. Isolated subsolver는 downside를 한 worker로 bound하면서, 도움이
+되면 solution / variable bound sharing으로 portfolio 전체에 lift.
 
-Evolve surface (`phase5_custom_subsolvers/initial_program.py` EVOLVE-BLOCK):
+Phase 5 EVOLVE-BLOCK:
 
-| Surface | Applied when | Purpose |
-|---|---|---|
-| `CUSTOM_SUBSOLVERS` | every problem | portfolio additions for all problems |
-| `STAGE3_CUSTOM_SUBSOLVERS` | `stage == "stage3"` AND `problem.is_outlier` | extra subsolvers for long-tail outliers |
+| Surface | 적용 |
+|---|---|
+| `CUSTOM_SUBSOLVERS` | 모든 문제 |
+| `STAGE3_CUSTOM_SUBSOLVERS` | stage3 outlier 전용 |
 
-Each entry is a dict:
-
+각 entry:
 ```python
 {
-    "name": "max_lp_heavy",            # required, unique
-    "params": {"linearization_level": 2, "add_mir_cuts": True},
-    "needs_objective": False,          # optional; skip on objective-less models
-    "min_constraints": 50000,          # optional inclusive lower gate
-    "max_constraints": None,           # optional exclusive upper gate
+    "name": "max_lp_heavy",
+    "params": {"linearization_level": 2, "add_mir_cuts": True,
+               "max_num_cuts": 12000, "cut_level": 2},
+    "min_constraints": 50000,
+    "max_constraints": None,
 }
 ```
 
-`get_params()` turns eligible entries into `subsolver_params` (a named
-`SatParameters` set per subsolver) plus `extra_subsolvers` names, on top of the
-inherited phase4 config. `needs_objective` entries are dropped when the model
-has no objective (`shared/has_objective_cache.json`), avoiding portfolio
-collapse. Locks: `random_seed=0`, `num_search_workers=8`,
-`interleave_search=True` (the cross-worker sharing that makes an isolated
-subsolver pay off requires it).
+`_solve_worker.py`가 `subsolver_params` 전체를 standalone proto로 빌드 후
+대입 — recent ortools (9.15+)의 nested repeated message in-place mutation
+미지원 우회.
 
-The worker (`shared/_cpsat_solve_worker.py`) builds params on a standalone
-`sat_parameters_pb2.SatParameters` proto and assigns it wholesale, so nested
-`subsolver_params` messages apply on recent ortools (9.15+) where in-place
-mutation of repeated messages is unsupported. Invalid subsolver fields surface
-as `invalid_param: subsolver_params.<field>`.
+Locked: `random_seed=0`, `num_search_workers=8`, `interleave_search=True`
+(cross-worker sharing 전제).
 
-Phase 5 is the terminal phase (no extract step). Phase 4 is therefore no longer
-terminal: `run_phase.sh` materializes its EVOLVE-BLOCK before it runs (config
-key `unified_prepare_before_dir`) and extracts `phase4_best.json` after, which
-phase 5 inherits.
+Phase 5는 terminal — extract 단계 없음. Phase 4가 `unified_prepare_before_dir`
+target이라 `python -m _lib.prepare_phase cpsat-bench`로 미리 머터리얼됨.
 
 ## Quick start
 
 ```bash
-# 0) populate raw-data from gitlab package 71 (first time only)
+# 1. raw-data 채우기 (최초 1회)
 cd input/cpsat-bench/raw-data && bash load_script.sh && cd -
 
-# 1) build sample files (re-run any time raw-data changes)
-python input/cpsat-bench/evolve/build_samples.py
+# 2. 전체 pipeline (sampler + rebaseline + 5 phases 순차)
+./input/run_phase.sh cpsat-bench --pin 2-7
 
-# 2) sanity-check: does the runner reproduce baseline timings?
-python input/cpsat-bench/evolve/shared/baseline_params.py
+# 3. 단계별
+python -m _lib.sampler cpsat-bench           # cache/stage{1..4}_sample.json
+python -m _lib.self_test cpsat-bench         # baseline sanity (stage1)
+python -m _lib.rebaseline cpsat-bench        # cache/local_baseline.json (10회 평균)
+./input/run_phase.sh cpsat-bench 1 --pin 2-7
+./input/run_phase.sh cpsat-bench 2 --pin 2-7
+./input/run_phase.sh cpsat-bench 3 --pin 2-7
+./input/run_phase.sh cpsat-bench 4 --pin 2-7
+./input/run_phase.sh cpsat-bench 5 --pin 2-7
 
-# 3) optional: measure baseline on local box (captures objective_value
-#    for cost-mode scoring — first run picks it up automatically too)
-python input/cpsat-bench/evolve/rebaseline_local.py
-
-# 4) run phases sequentially (small profile = historical run)
-./input/run_phase.sh cpsat-bench 1
-./input/run_phase.sh cpsat-bench 2
-./input/run_phase.sh cpsat-bench 3
-./input/run_phase.sh cpsat-bench 4   # unified refinement (top-level params)
-./input/run_phase.sh cpsat-bench 5   # custom subsolvers (inherits phase4_best)
-# or all phases at once:
-./input/run_phase.sh cpsat-bench
+# 4. 최종 검증 — run_phase.sh가 마지막 phase 후 자동 생성한 final_program.py 사용
+python -m _lib.final_verify cpsat-bench \
+    input/cpsat-bench/evolve/final_program.py
 ```
 
-After each non-final phase (1–4), `run_phase.sh` calls `extract_best.py` to
-write `shared/phaseN_best.json`, which the next phase's `initial_program.py`
-loads. Phase 5 is terminal (no extract). Running phase 5 standalone requires
-`shared/phase4_best.json` — produced by phase 4, or regenerate with
-`./input/run_phase.sh cpsat-bench 4 --extract-only`.
+마지막 phase 완료 후 `_lib.finalize`가 자동 실행 →
+`<bench>/evolve/final_program.py`에 phase5 best_program.py 복사. 이 파일이
+canonical evolved 결과. 수동 재생성: `python -m _lib.finalize cpsat-bench`.
 
-## Profiles (`small` vs `large`)
+각 non-final phase 완료 후 `_lib.extract_best`가
+`cache/phaseN_best.json` (+ buckets / stage3) 자동 생성.
+다음 phase는 그 파일을 inheritance source로 읽음.
 
-`run_phase.sh --profile <small|large>` switches between two independent
-tuning tracks:
+## Worker count 정책
 
-| | small (default) | large |
+| Phase | `num_search_workers` | 이유 |
 |---|---|---|
-| sample files | `stage1/2_sample.json` (stage3/4 empty) | `stage1_large_sample.json` (single sample) |
-| phase1/2 workers | 1 | 8 |
-| phase3/4 workers | 8 | 8 |
-| cascade | stage1 → stage2 → **combined final** (no stage3/4) | single eval on all stages (cache-backed) |
-| solve repeats | **10× per problem, averaged** | 1× |
-| problem set | clustered fast (c1+c2) + mid (c3+c4) | top-`STAGE1_LARGE_N` outlier(s) sorted by `STAGE1_LARGE_SORT_BY` |
-| output dir | `openevolve_output/` | `openevolve_output_large/` |
+| 1 | 1 (small) / 8 (large profile) | 다른 knob noise 차단 |
+| 2 | 1 (small) / 8 (large profile) | presolve clean signal |
+| 3 | 8 | subsolver mix engaged |
+| 4 | 8 | 통합 refinement |
+| 5 | 8 | portfolio sharing 필요 |
 
-Both profiles use **deterministic_time** as the primary score metric (wall is
-diagnostic only) and treat a **non-feasible variant's real measured time** as
-its ratio — a timed-out solve contributes its slow timeout ratio + a
-`solved_rate` drop, never a fixed `1e-6` sentinel and never an abort.
+`OPENEVOLVE_PROFILE=large`로 phase 1/2도 W=8 운영 가능 (outlier 튜닝 트랙).
 
-Profile sets `OPENEVOLVE_PROFILE` env var that:
-
-- `evaluator.py` reads to pick sample files and route the cascade:
-  - **small** → `evaluate_stage1` (stage1), `evaluate_stage2` (stage2),
-    `evaluate_stage3` = `_finalize_small()` which merges the cached stage1 +
-    stage2 per-problem results into one combined score (no stage3/4). Each
-    solve runs `N_REPEATS_SMALL` (=10) times and averages dtime/wall/counters
-    to damp multi-worker jitter (`OPENEVOLVE_SOLVE_REPEATS` overrides).
-  - **large** → every entry point dispatches to a single `_evaluate_large()`
-    over the outlier set (cache-backed, 1× solve).
-- `rebaseline_local.py` reads to rebaseline only the active profile's sample set.
-- `phase{1,2}_*/initial_program.py` reads to override `PHASE_LOCKED`
-  `num_search_workers=8` (default 1).
-
-Build samples per profile:
-
-```bash
-python build_samples.py            # default: all 4 stages (stage3=outliers, stage4=broad)
-python build_samples.py --small    # small: stage1+stage2 only, stage3/4 empty
-python build_samples.py --optimize-only   # restrict pool to objective-bearing problems
-```
-
-`run_phase.sh --profile small` auto-passes `--small` to the build step.
-Adjust `STAGE1_LARGE_N` / `STAGE1_LARGE_SORT_BY` in `build_samples.py` to
-widen or re-rank the large outlier set.
-
-```bash
-# large profile (all phases W=8, single hardest outlier)
-./input/run_phase.sh cpsat-bench --profile large
-./input/run_phase.sh cpsat-bench 1 --profile large    # single phase
-```
-
-`local_baseline.json` is shared across profiles (keyed by worker count);
-running both profiles reuses each other's measurements where worker count
-matches.
-
-> Note: `extract_best.py` writes a single `phaseN_best.json` per phase
-> regardless of profile. Running both profiles back-to-back overwrites the
-> previous profile's best file. Rename/move it manually if you want to keep
-> both.
-
-## Resume from checkpoint
-
-```bash
-cd input/cpsat-bench/evolve/phase2_presolve/
-python /app/openevolve-run.py \
-    initial_program.py \
-    ../shared/evaluator.py \
-    --config ../config.yaml \
-    --checkpoint openevolve_output/checkpoints/checkpoint_50 \
-    --iterations 100
-```
-
-## Environment variables
-
-| variable | default | use |
-|---|---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` / `OPENAI_API_KEY` | — | LLM credential (claude_code provider) |
-| `OPENEVOLVE_PARALLEL_SOLVERS` | 1 | concurrent solver subprocesses per stage (taskset-pinned on Linux to cores 1..N). Each CP-SAT uses num_search_workers=8 internally — size accordingly. |
-| `OPENEVOLVE_CORE_RANGE` | unset | explicit taskset core range `N-M` (overrides PARALLEL_SOLVERS for pinning; concurrency = range size). e.g. `2-7` → 6 workers on cores 2..7. `run_phase.sh --pin 2-7` is sugar for this. |
-| `OPENEVOLVE_MAX_PROBLEMS` | unlimited | cap stage problem count (testing) |
-| `OPENEVOLVE_STATS_WEIGHT` | 0.333 | exponent on efficiency factor (0 disables) |
-| `OPENEVOLVE_COST_WEIGHT` | 1.0 | exponent on cost_ratio in cost-mode score (0 disables cost factor) |
-| `OPENEVOLVE_PYTHON_BIN` | `sys.executable` | python used by solver worker |
-| `OPENEVOLVE_PROFILE` | `small` | tuning track: `small` (cascade staging) or `large` (single outlier eval). Set automatically by `run_phase.sh --profile`. Drives sample file selection in `evaluator.py` / `rebaseline_local.py` and worker count override in phase1/2 `initial_program.py`. |
-| `SKIP_REBASELINE` | 0 | skip per-host baseline remeasurement (reuse existing local_baseline.json) |
-
-## CPU pinning (Linux)
-
-For stable wall-clock measurement, isolate cores via
-`scripts/host-isolate-cores.sh start` (from the openevolve repo root) and
-run the docker container with `./docker-run.sh dev -s cpsat --pin 1-6`.
-The runner already pins each worker subprocess with `taskset -c <core>`.
-
-## Score formula (cost mode)
+## Score 공식 (cost mode)
 
 ```
-combined_score = geomean( (b_obj/v_obj)^COST_W  *  time_ratio )
+combined_score = geomean( (b_obj/v_obj)^COST_W * time_ratio )
                  * solved_rate^2
                  * efficiency^STATS_WEIGHT
 
-time_ratio = baseline_dtime / variant_dtime    (primary)
-           = baseline_ms    / variant_ms       (fallback when dtime missing)
+time_ratio  = baseline_dtime / variant_dtime    (primary)
+            = baseline_ms    / variant_ms       (dtime 누락 시 fallback)
+cost_ratio  = (baseline_obj + eps) / (variant_obj + eps)
 ```
 
-- **Deterministic_time** (CP-SAT's hardware-independent work measure) is the
-  primary time metric. Wall-clock varies with CPU load / NUMA / thermal
-  state — using dtime removes that noise from the score so genuine knob
-  improvements are visible. `geomean_speedup` in the metrics dict is the
-  dtime ratio; `geomean_wall_speedup` is reported alongside as a
-  diagnostic. Override with `OPENEVOLVE_TIME_METRIC=wall` if needed.
-- Fallback to wall when either side lacks `deterministic_time` in `stats`
-  (e.g. older local_baseline.json from before this change — rerun
-  `rebaseline_local.py` to refresh).
-- All 85 baselines are OPTIMAL, so if the variant also reaches OPTIMAL, the
-  cost ratio collapses to 1.0 and score reduces to geomean(time speedup).
-- Variants that bail to FEASIBLE-but-worse-objective are penalized via the
-  cost ratio; variants that bail to UNKNOWN/INFEASIBLE contribute 1e-6 to
-  the geomean (~60× penalty across stage1's 10 problems).
-- Efficiency factor multiplies based on `num_conflicts` (weight 2.0) and
-  `num_branches` (weight 1.5) ratios vs baseline.
+- `deterministic_time` 은 CP-SAT의 하드웨어 독립적 work measure. wall-clock
+  noise (CPU load / NUMA / thermal) 제거됨. `geomean_speedup` = dtime 기반,
+  `geomean_wall_speedup` = wall 기반 (진단용).
+- 85 baseline 모두 OPTIMAL → variant도 OPTIMAL이면 cost_ratio = 1.0 → score
+  = geomean(time speedup).
+- Variant가 FEASIBLE-but-worse-objective → cost_ratio < 1로 감점.
+- Variant가 UNKNOWN/INFEASIBLE → solved_rate^2 drop + 실측 timeout ratio
+  contribution.
+- Efficiency factor: `num_conflicts` (weight 2.0), `num_branches` (weight 1.5)
+  ratio.
 
 ## Locked params
 
-`random_seed=0`, `num_search_workers` (per-phase: 1 in phase1/2, 8 in
-phase3/4/5). Phase 5 additionally locks `interleave_search=True` (required for
-the cross-worker sharing a custom subsolver depends on).
+`random_seed=0` 전역. Phase별 `num_search_workers` lock. Phase 5는 추가로
+`interleave_search=True` lock.
 
-Modifying any locked key in `get_params()` returns `combined_score=0` plus a
-`locked_violated` artifact identifying the offending key. Per-problem
-`get_params(problem, stage)` calls have locked keys and `num_search_workers`
-re-pinned defensively by the evaluator after the call returns, so SIZE_BUCKETS
-/ STAGE3_OVERRIDES cannot override them even by accident.
+위반 시 `combined_score=0` + `locked_violated` artifact. 평가자가
+per-problem `get_params(problem, stage)` 호출 후 lock을 defensive하게 재적용
+— SIZE_BUCKETS / STAGE3_OVERRIDES로 우회 불가.
+
+## 참고
+
+- 파라미터 카탈로그 + LLM prompt reference: `params.json` (rich schema —
+  type, range, default, desc). `_lib.params_catalog` 로 load + validate.
+  `config.yaml`의 `prompt.system_message`에 `{{params_reference}}` 토큰으로
+  삽입 가능 (prompt 자동 합성).
+- 환경 변수: [`input/README.md`](../../README.md#environment-knobs) 참고.

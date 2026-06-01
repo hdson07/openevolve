@@ -1,0 +1,194 @@
+{
+  "solver": "z3",
+  "version": "z3 4.13.x",
+
+  "defaults": {
+    "opt.enable_core_rotate": true,
+    "opt.enable_sat": true,
+    "opt.enable_sls": true,
+    "opt.maxres.hill_climb": true,
+    "opt.maxsat_engine": "wmax",
+    "opt.priority": "pareto",
+    "opt.rc2.totalizer": true,
+    "parallel.enable": false,
+    "sat.branching.heuristic": "vsids",
+    "sat.pb.solver": "totalizer",
+    "sat.phase": "caching",
+    "sat.random_seed": 0,
+    "sat.restart": "geometric",
+    "sat.threads": 1,
+    "sls.random_seed": 0,
+    "smt.phase_selection": 3,
+    "smt.random_seed": 0,
+    "smt.threads": 1,
+    "threads": 1
+  },
+
+  "locked": {
+    "sat.random_seed": 0,
+    "smt.random_seed": 0,
+    "sls.random_seed": 0,
+    "parallel.enable": false,
+    "threads": 1
+  },
+
+  "groups": {
+    "opt": {
+      "description": "Optimization engine and MaxSAT settings (opt.*).",
+      "params": {
+        "opt.maxsat_engine": {
+          "type": "enum",
+          "values": ["maxres", "pd-maxres", "wmax", "sortmax", "rc2", "maxres-bin"],
+          "default": "wmax",
+          "desc": "MaxSAT solver engine."
+        },
+        "opt.optsmt_engine": {
+          "type": "enum",
+          "values": ["basic", "farkas", "symba"],
+          "default": "basic",
+          "desc": "OPT-SMT engine choice."
+        },
+        "opt.priority": {
+          "type": "enum",
+          "values": ["lex", "pareto", "box"],
+          "default": "pareto",
+          "desc": "Multi-objective combination strategy."
+        },
+        "opt.enable_sat": {
+          "type": "bool", "default": true,
+          "desc": "Enable SAT-based MaxSAT engines."
+        },
+        "opt.enable_sls": {
+          "type": "bool", "default": true,
+          "desc": "Enable SLS engine for unsat-core minimization."
+        },
+        "opt.enable_core_rotate": {
+          "type": "bool", "default": true,
+          "desc": "Rotate among unsat cores during MaxSAT."
+        },
+        "opt.maxres.hill_climb": {
+          "type": "bool", "default": true,
+          "desc": "Hill-climb in MaxRes."
+        },
+        "opt.maxres.max_core_size": {
+          "type": "int", "default": 0, "range": [0, 100],
+          "desc": "Max core size considered in MaxRes (0=unlimited)."
+        },
+        "opt.maxres.add_upper_bound_block": {
+          "type": "bool", "default": false,
+          "desc": "Add objective upper-bound blocking clause."
+        },
+        "opt.rc2.totalizer": {
+          "type": "bool", "default": true,
+          "desc": "Use totalizer encoding inside RC2."
+        }
+      }
+    },
+
+    "sat_branching": {
+      "description": "Boolean SAT branching and restart strategy.",
+      "params": {
+        "sat.branching.heuristic": {
+          "type": "enum",
+          "values": ["vsids", "lrb", "chb"],
+          "default": "vsids",
+          "desc": "Branching variable scoring strategy."
+        },
+        "sat.phase": {
+          "type": "enum",
+          "values": ["always_false", "always_true", "basic_caching", "random", "caching"],
+          "default": "caching",
+          "desc": "Variable phase-selection policy."
+        },
+        "sat.restart": {
+          "type": "enum",
+          "values": ["luby", "geometric", "ema", "static"],
+          "default": "geometric",
+          "desc": "Restart schedule family."
+        },
+        "sat.gc": {
+          "type": "enum",
+          "values": ["glue", "psm", "glue_psm", "dyn_psm"],
+          "default": "glue_psm",
+          "desc": "Clause garbage-collection strategy."
+        },
+        "sat.pb.solver": {
+          "type": "enum",
+          "values": ["circuit", "sorting", "totalizer", "solver", "segmented", "binary_merge"],
+          "default": "totalizer",
+          "desc": "Pseudo-Boolean constraint encoding."
+        },
+        "sat.cardinality.encoding": {
+          "type": "enum",
+          "values": ["grouped", "bimander", "ordered", "unate", "circuit"],
+          "default": "grouped",
+          "desc": "Cardinality constraint encoding."
+        }
+      }
+    },
+
+    "smt": {
+      "description": "Top-level SMT solver controls (smt.*).",
+      "params": {
+        "smt.phase_selection": {
+          "type": "int", "default": 3, "range": [0, 5],
+          "desc": "0=always_false 1=always_true 2=basic_caching 3=caching 4=random 5=occurrence."
+        },
+        "smt.case_split": {
+          "type": "int", "default": 1, "range": [0, 6],
+          "desc": "Case-split heuristic. 0..6."
+        },
+        "smt.restart_strategy": {
+          "type": "int", "default": 0, "range": [0, 4],
+          "desc": "0=geometric 1=inner_outer 2=luby 3=fixed 4=arithmetic."
+        },
+        "smt.arith.solver": {
+          "type": "enum",
+          "values": [2, 5, 6],
+          "default": 2,
+          "desc": "2=simplex 5=infinitary_lra 6=lra."
+        }
+      }
+    },
+
+    "sls": {
+      "description": "Stochastic local search engine controls.",
+      "params": {
+        "sls.walksat_ucb_constant": {
+          "type": "float", "default": 0.9, "range": [0.0, 10.0],
+          "desc": "UCB exploration constant for WalkSAT."
+        },
+        "sls.wp": {
+          "type": "int", "default": 20, "range": [0, 100],
+          "desc": "Walk probability percent."
+        }
+      }
+    },
+
+    "locked_keys": {
+      "description": "Seeds + parallelism — LOCKED, do not modify.",
+      "params": {
+        "sat.random_seed": {
+          "type": "int", "default": 0, "range": [0, 2147483647],
+          "desc": "Locked."
+        },
+        "smt.random_seed": {
+          "type": "int", "default": 0, "range": [0, 2147483647],
+          "desc": "Locked."
+        },
+        "sls.random_seed": {
+          "type": "int", "default": 0, "range": [0, 2147483647],
+          "desc": "Locked."
+        },
+        "parallel.enable": {
+          "type": "bool", "default": false,
+          "desc": "Locked off."
+        },
+        "threads": {
+          "type": "int", "default": 1, "range": [1, 1],
+          "desc": "Locked at 1."
+        }
+      }
+    }
+  }
+}

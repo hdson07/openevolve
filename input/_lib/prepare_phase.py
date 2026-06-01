@@ -1,27 +1,29 @@
 """
-Materialize a unified phase's initial_program.py with the union of prior-phase
-winners (from shared/phaseN_best.json + optional phaseN_buckets.json +
-phaseN_stage3.json).
+Materialize a unified phase's initial_program.py with the union of
+prior-phase winners (from cache/phaseN_best.json + optional
+phaseN_buckets.json + phaseN_stage3.json).
 
-Per-bench `prepare_phase_unified.py` wrappers call
-`main(root, shared, prior_phases, unified_file)` after all prior phases
-have completed (and extract_best.py ran for each).
+CLI: `python -m _lib.prepare_phase <bench>`
 
-Rewrites only the EVOLVE-BLOCK section of the unified phase's initial_program.py.
+Reads `<bench>/evolve/config.yaml`:
+  - `bench.phases[*].dir` → ordered phase list
+  - `bench.unified_prepare_before_dir` (optional) → which phase is the
+    unified target. Defaults to the last phase.
+  - `bench.unified_dict_name` (optional) → name of the merged-overrides
+    dict written into the EVOLVE-BLOCK (default "UNIFIED_OVERRIDES";
+    cpsat uses "GLOBAL_OVERRIDES").
 
-Output format inside EVOLVE-BLOCK (cpsat-bench layout):
-    GLOBAL_OVERRIDES = {...}            # union of phaseN_best.json
-    SIZE_BUCKETS     = [(upper, {...})] # merged per-bucket overrides
-    STAGE3_OVERRIDES = {...}            # union of phaseN_stage3.json
-
-If a bench doesn't ship the bucket/stage3 files, only GLOBAL_OVERRIDES is
-written (legacy single-dict layout) — controlled by `dict_name` parameter.
+Rewrites only the EVOLVE-BLOCK section. If a bench ships bucket / stage3
+extracts, the block also gets `SIZE_BUCKETS` + `STAGE3_OVERRIDES`.
 """
+import argparse
 import json
 import pathlib
 import pprint
 import re
 import sys
+
+from _lib import bench_paths
 
 _EVOLVE_BLOCK_RE = re.compile(
     r"(# EVOLVE-BLOCK-START\n).*?(# EVOLVE-BLOCK-END)",
@@ -78,17 +80,37 @@ def _format_buckets_literal(buckets):
     return "\n".join(lines)
 
 
+def main_cli(argv=None):
+    """CLI entry: `python -m _lib.prepare_phase <bench>`."""
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    ap.add_argument("bench", help="bench dir name (e.g. cpsat-bench)")
+    args = ap.parse_args(argv)
+
+    root = bench_paths.resolve_bench(args.bench)
+    shared = bench_paths.cache_dir(root)
+    cfg = bench_paths.load_config(root)
+    bench_cfg = cfg.get("bench") or {}
+    phases = [ph["dir"] for ph in (bench_cfg.get("phases") or [])]
+    if not phases:
+        raise SystemExit("bench.phases missing in config.yaml")
+
+    target = bench_cfg.get("unified_prepare_before_dir") or phases[-1]
+    if target not in phases:
+        raise SystemExit(f"unified_prepare_before_dir={target!r} not in "
+                         f"bench.phases ({phases})")
+    target_idx = phases.index(target)
+    if target_idx == 0:
+        raise SystemExit(f"unified target {target!r} has no prior phases")
+    prior_phases = list(range(1, target_idx + 1))
+    unified_file = root / target / "initial_program.py"
+    dict_name = bench_cfg.get("unified_dict_name") or "UNIFIED_OVERRIDES"
+    if not unified_file.exists():
+        raise SystemExit(f"unified initial_program.py not found: {unified_file}")
+    return main(root, shared, prior_phases, unified_file, dict_name=dict_name)
+
+
 def main(root, shared, prior_phases, unified_file, dict_name="UNIFIED_OVERRIDES"):
-    """
-    root           — bench evolve dir (pathlib.Path)
-    shared         — bench evolve/shared dir (pathlib.Path)
-    prior_phases   — list of phase ints to merge (e.g. [1, 2, 3])
-    unified_file   — path to the unified phase's initial_program.py
-    dict_name      — variable name for the merged global dict. Default
-                     "UNIFIED_OVERRIDES" (legacy). cpsat-bench unified phase
-                     uses "GLOBAL_OVERRIDES"; pass dict_name="GLOBAL_OVERRIDES"
-                     from the wrapper.
-    """
+    """Direct invocation (also used by main_cli)."""
     unified_file = pathlib.Path(unified_file)
 
     merged = {}
@@ -157,3 +179,7 @@ def main(root, shared, prior_phases, unified_file, dict_name="UNIFIED_OVERRIDES"
     suffix = " (+ SIZE_BUCKETS, STAGE3_OVERRIDES)" if has_extras else ""
     print(f"wrote {unified_file.relative_to(pathlib.Path(root))} "
           f"({len(merged)} keys in EVOLVE-BLOCK){suffix}")
+
+
+if __name__ == "__main__":
+    main_cli()
