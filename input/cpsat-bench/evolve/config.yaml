@@ -35,14 +35,14 @@ bench:
 
   # === Clustering / stage sampling (consumed by _lib.sampler). ===
   clustering:
-    method: kmeans                 # kmeans | quintile | thresholds
-    feature: features.num_constraints
+    method: quintile                 # kmeans | quintile | thresholds
+    feature: cpsat_status.elapsed_ms
     n_clusters: 5
     max_baseline_ms: 120000        # drop outliers > 120s from sample pool
     spread: quintile
     stage_sizes:
-      stage1: 10
-      stage2: 10
+      stage1: 5
+      stage2: 5
       stage3: 5
       stage4: 20
     stage_clusters:

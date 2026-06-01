@@ -24,7 +24,7 @@ bench:
   # === Clustering / stage sampling. ===
   clustering:
     method: kmeans
-    feature: features.num_hard_constraints
+    feature: z3_status.elapsed_ms
     n_clusters: 5
     max_baseline_ms: 300000        # 5 min cap
     spread: quintile

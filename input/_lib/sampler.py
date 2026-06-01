@@ -144,6 +144,74 @@ def _pick_spread(pool, n_pick, mode):
     return out
 
 
+def _quartiles(values):
+    """Return (min, p25, median, p75, max) for a non-empty numeric list."""
+    if not values:
+        return (0, 0, 0, 0, 0)
+    s = sorted(values)
+    n = len(s)
+
+    def _pct(p):
+        idx = max(0, min(n - 1, int(round((n - 1) * p))))
+        return s[idx]
+
+    return (s[0], _pct(0.25), _pct(0.5), _pct(0.75), s[-1])
+
+
+def _fmt_ms(v):
+    if v >= 1000:
+        return f"{v / 1000:.1f}s"
+    return f"{int(v)}ms"
+
+
+def _print_stage_report(stage_name, picks, pool, cluster_ids,
+                        feature_path, baseline_ms, baseline_result, fname):
+    pool_n = len(pool)
+    picks_n = len(picks)
+
+    if picks_n == 0:
+        print(f"  {stage_name} ({fname}): 0 picks from clusters "
+              f"{cluster_ids} (pool={pool_n})")
+        return
+
+    pick_ms = [baseline_ms(r) for r in picks]
+    pool_ms = [baseline_ms(r) for r in pool]
+    pick_feat = [float(_dotted(r, feature_path) or 0) for r in picks]
+    pool_feat = [float(_dotted(r, feature_path) or 0) for r in pool]
+
+    p_lo, p_q1, p_med, p_q3, p_hi = _quartiles(pick_ms)
+    o_lo, o_q1, o_med, o_q3, o_hi = _quartiles(pool_ms)
+    f_lo, _, f_med, _, f_hi = _quartiles(pick_feat)
+    of_lo, _, of_med, _, of_hi = _quartiles(pool_feat)
+
+    # Per-result count
+    counts = {}
+    for r in picks:
+        counts[baseline_result(r)] = counts.get(baseline_result(r), 0) + 1
+    result_str = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+
+    print()
+    print(f"  {stage_name} ({fname}): {picks_n} picks from "
+          f"clusters {cluster_ids} (pool={pool_n})")
+    print(f"    results:        {result_str}")
+    print(f"    picks  baseline_ms:  min={_fmt_ms(p_lo)} p25={_fmt_ms(p_q1)} "
+          f"median={_fmt_ms(p_med)} p75={_fmt_ms(p_q3)} max={_fmt_ms(p_hi)}")
+    print(f"    pool   baseline_ms:  min={_fmt_ms(o_lo)} p25={_fmt_ms(o_q1)} "
+          f"median={_fmt_ms(o_med)} p75={_fmt_ms(o_q3)} max={_fmt_ms(o_hi)}")
+    print(f"    picks  {feature_path}: min={int(f_lo)} median={int(f_med)} "
+          f"max={int(f_hi)}")
+    print(f"    pool   {feature_path}: min={int(of_lo)} median={int(of_med)} "
+          f"max={int(of_hi)}")
+    print("    picks:")
+    for r in picks:
+        sha = r["problem_sha256"][:12]
+        ms = baseline_ms(r)
+        feat = int(_dotted(r, feature_path) or 0)
+        res = baseline_result(r)
+        print(f"      {sha}  {res:<10}  {_fmt_ms(ms):>8}  "
+              f"{feature_path}={feat}")
+
+
 def build_samples(bench_root, *, adapter=None):
     """Sample-build entry. `bench_root` is the absolute path to
     `<bench>/evolve/`."""
@@ -243,6 +311,9 @@ def build_samples(bench_root, *, adapter=None):
     stage_clusters = cluster_cfg.get("stage_clusters") or {}
     spread = cluster_cfg.get("spread", "quintile")
 
+    print()
+    print(f"stages (spread={spread}, sizes={stage_sizes}):")
+
     for stage_name in sorted(stage_sizes.keys()):
         n_pick = int(stage_sizes[stage_name])
         cluster_ids = stage_clusters.get(stage_name) or []
@@ -269,8 +340,10 @@ def build_samples(bench_root, *, adapter=None):
                 } for r in picks],
             }, indent=2) + "\n"
         )
-        print(f"wrote {sample_path.name} ({len(picks)} from clusters "
-              f"{cluster_ids})")
+
+        _print_stage_report(stage_name, picks, merged, cluster_ids,
+                            feature_path, _baseline_ms, _baseline_result,
+                            sample_path.name)
 
 
 def main(argv=None):
